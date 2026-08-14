@@ -19,6 +19,14 @@ const {
   correctWritingHandler,
   WritingFunctionError,
 } = require("./writing_helpers");
+const {
+  WritingAccessError,
+  toHttpsError,
+  registerWritingStudentSession,
+  getWritingFeatureStatus,
+  setSchoolWritingFeature,
+  assertWritingEnabledForAuth,
+} = require("./writing_access");
 
 // 🔥 ffmpeg（WebM → WAV 変換）
 const ffmpegPath = require("ffmpeg-static");
@@ -28,6 +36,9 @@ const ffmpeg = require("fluent-ffmpeg");
 admin.initializeApp({ projectId: "shadow-speak-school" });
 const db = admin.firestore();
 const storage = admin.storage();
+const enforceWritingAccess =
+  process.env.FUNCTIONS_EMULATOR !== "true" ||
+  process.env.WRITING_ENFORCE_ACCESS === "true";
 
 // ---- Global options
 setGlobalOptions({
@@ -44,6 +55,93 @@ const SPEECH_REGION = defineSecret("SPEECH_REGION");
 /* =========================================================
    ✍️ Writing Mode: English correction for local/emulator use
    ========================================================= */
+exports.registerWritingStudentSession = onCall(
+  {
+    region: "asia-northeast1",
+    timeoutSeconds: 30,
+    memory: "256MiB",
+  },
+  async (req) => {
+    if (!req.auth || !req.auth.uid) {
+      throw new HttpsError("unauthenticated", "ログインが必要です。");
+    }
+
+    try {
+      return await registerWritingStudentSession({
+        db,
+        admin,
+        authUid: req.auth.uid,
+        data: req.data,
+      });
+    } catch (error) {
+      if (error instanceof WritingAccessError) throw toHttpsError(error);
+      console.error("🚨 registerWritingStudentSession failed", {
+        name: error?.name || "Error",
+        message: error?.message || String(error),
+      });
+      throw new HttpsError("internal", "Writing認証に失敗しました。");
+    }
+  }
+);
+
+exports.getWritingFeatureStatus = onCall(
+  {
+    region: "asia-northeast1",
+    timeoutSeconds: 15,
+    memory: "256MiB",
+  },
+  async (req) => {
+    if (!req.auth || !req.auth.uid) {
+      throw new HttpsError("unauthenticated", "ログインが必要です。");
+    }
+
+    try {
+      return await getWritingFeatureStatus({
+        db,
+        authUid: req.auth.uid,
+      });
+    } catch (error) {
+      if (error instanceof WritingAccessError) {
+        return { enabled: false };
+      }
+      console.error("🚨 getWritingFeatureStatus failed", {
+        name: error?.name || "Error",
+        message: error?.message || String(error),
+      });
+      return { enabled: false };
+    }
+  }
+);
+
+exports.setSchoolWritingFeature = onCall(
+  {
+    region: "asia-northeast1",
+    timeoutSeconds: 30,
+    memory: "256MiB",
+  },
+  async (req) => {
+    if (!req.auth || !req.auth.uid) {
+      throw new HttpsError("unauthenticated", "ログインが必要です。");
+    }
+
+    try {
+      return await setSchoolWritingFeature({
+        db,
+        admin,
+        uid: req.auth.uid,
+        data: req.data,
+      });
+    } catch (error) {
+      if (error instanceof WritingAccessError) throw toHttpsError(error);
+      console.error("🚨 setSchoolWritingFeature failed", {
+        name: error?.name || "Error",
+        message: error?.message || String(error),
+      });
+      throw new HttpsError("internal", "Writing機能設定の更新に失敗しました。");
+    }
+  }
+);
+
 exports.correctWriting = onCall(
   {
     region: "asia-northeast1",
@@ -67,6 +165,13 @@ exports.correctWriting = onCall(
     });
 
     try {
+      if (enforceWritingAccess) {
+        await assertWritingEnabledForAuth({
+          db,
+          authUid: req.auth.uid,
+        });
+      }
+
       const result = await correctWritingHandler({
         data: req.data,
         apiKey: process.env.OPENAI_API_KEY,
@@ -79,6 +184,7 @@ exports.correctWriting = onCall(
       });
       return result;
     } catch (error) {
+      if (error instanceof WritingAccessError) throw toHttpsError(error);
       if (error instanceof WritingFunctionError) {
         throw new HttpsError(error.code, error.message);
       }

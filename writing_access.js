@@ -1,0 +1,209 @@
+"use strict";
+
+const { HttpsError } = require("firebase-functions/v2/https");
+
+const SESSION_COLLECTION = "writingAuthSessions";
+const ID_PATTERN = /^[A-Za-z0-9._:-]{1,160}$/;
+
+class WritingAccessError extends Error {
+  constructor(code, message) {
+    super(message);
+    this.code = code;
+  }
+}
+
+function toHttpsError(error) {
+  if (error instanceof WritingAccessError) {
+    return new HttpsError(error.code, error.message);
+  }
+  return new HttpsError("internal", "Writing機能の権限確認に失敗しました。");
+}
+
+function cleanId(value, label) {
+  const text = typeof value === "string" ? value.trim() : "";
+  if (!text || text.includes("/") || !ID_PATTERN.test(text)) {
+    throw new WritingAccessError("invalid-argument", `${label}が不正です。`);
+  }
+  return text;
+}
+
+function cleanPassword(value) {
+  const text = typeof value === "string" ? value : "";
+  if (!text) {
+    throw new WritingAccessError("invalid-argument", "パスワードが不正です。");
+  }
+  if (text.length > 200) {
+    throw new WritingAccessError("invalid-argument", "パスワードが不正です。");
+  }
+  return text;
+}
+
+function isWritingEnabledFromSchoolData(data) {
+  return data &&
+    data.features &&
+    data.features.writing &&
+    data.features.writing.enabled === true;
+}
+
+async function requireOperationAdmin({ db, uid }) {
+  const authUid = cleanId(uid, "管理者UID");
+  const snap = await db.collection("admins").doc(authUid).get();
+  const data = snap.exists ? snap.data() : null;
+  if (!data || data.active !== true) {
+    throw new WritingAccessError(
+      "permission-denied",
+      "この操作を行う権限がありません。"
+    );
+  }
+  return data;
+}
+
+async function setSchoolWritingFeature({ db, admin, uid, data }) {
+  await requireOperationAdmin({ db, uid });
+
+  const schoolId = cleanId(data && data.schoolId, "schoolId");
+  if (typeof (data && data.enabled) !== "boolean") {
+    throw new WritingAccessError("invalid-argument", "enabledが不正です。");
+  }
+
+  const schoolRef = db.collection("schools").doc(schoolId);
+  const schoolSnap = await schoolRef.get();
+  if (!schoolSnap.exists) {
+    throw new WritingAccessError("not-found", "対象の学校が見つかりません。");
+  }
+
+  await schoolRef.update({
+    "features.writing.enabled": data.enabled,
+    "features.writing.updatedAt": admin.firestore.FieldValue.serverTimestamp(),
+    "features.writing.updatedBy": uid,
+  });
+
+  return {
+    schoolId,
+    enabled: data.enabled,
+  };
+}
+
+async function registerWritingStudentSession({ db, admin, authUid, data }) {
+  const uid = cleanId(authUid, "認証UID");
+  const schoolId = cleanId(data && data.schoolId, "schoolId");
+  const studentInternalUid = cleanId(
+    data && data.studentInternalUid,
+    "studentInternalUid"
+  );
+  const loginId = cleanId(data && data.loginId, "loginId");
+  const password = cleanPassword(data && data.password);
+
+  const studentRef = db
+    .collection("schools")
+    .doc(schoolId)
+    .collection("students")
+    .doc(studentInternalUid);
+  const studentSnap = await studentRef.get();
+  const student = studentSnap.exists ? studentSnap.data() : null;
+
+  if (!student || String(student.loginId || "") !== loginId) {
+    throw new WritingAccessError(
+      "permission-denied",
+      "Writing認証に失敗しました。"
+    );
+  }
+  if (String(student.password || "") !== password) {
+    throw new WritingAccessError(
+      "permission-denied",
+      "Writing認証に失敗しました。"
+    );
+  }
+
+  const now = admin.firestore.FieldValue.serverTimestamp();
+  await db.collection(SESSION_COLLECTION).doc(uid).set(
+    {
+      schoolId,
+      studentInternalUid,
+      loginId,
+      active: true,
+      createdAt: now,
+      updatedAt: now,
+    },
+    { merge: true }
+  );
+
+  return {
+    ok: true,
+    schoolId,
+  };
+}
+
+async function resolveWritingSession({ db, authUid }) {
+  const uid = cleanId(authUid, "認証UID");
+  const sessionSnap = await db.collection(SESSION_COLLECTION).doc(uid).get();
+  const session = sessionSnap.exists ? sessionSnap.data() : null;
+  if (!session || session.active !== true) {
+    throw new WritingAccessError(
+      "permission-denied",
+      "Writing機能を利用できません。"
+    );
+  }
+
+  const schoolId = cleanId(session.schoolId, "schoolId");
+  const studentInternalUid = cleanId(
+    session.studentInternalUid,
+    "studentInternalUid"
+  );
+
+  const studentSnap = await db
+    .collection("schools")
+    .doc(schoolId)
+    .collection("students")
+    .doc(studentInternalUid)
+    .get();
+  if (!studentSnap.exists) {
+    throw new WritingAccessError(
+      "permission-denied",
+      "Writing機能を利用できません。"
+    );
+  }
+
+  return {
+    authUid: uid,
+    schoolId,
+    studentInternalUid,
+  };
+}
+
+async function getWritingFeatureStatus({ db, authUid }) {
+  const session = await resolveWritingSession({ db, authUid });
+  const schoolSnap = await db.collection("schools").doc(session.schoolId).get();
+  const enabled = schoolSnap.exists
+    ? isWritingEnabledFromSchoolData(schoolSnap.data()) === true
+    : false;
+  return {
+    enabled,
+    schoolId: session.schoolId,
+  };
+}
+
+async function assertWritingEnabledForAuth({ db, authUid }) {
+  const status = await getWritingFeatureStatus({ db, authUid });
+  if (status.enabled !== true) {
+    throw new WritingAccessError(
+      "permission-denied",
+      "この学校ではWriting機能を利用できません。"
+    );
+  }
+  return status;
+}
+
+module.exports = {
+  SESSION_COLLECTION,
+  WritingAccessError,
+  toHttpsError,
+  cleanId,
+  isWritingEnabledFromSchoolData,
+  requireOperationAdmin,
+  setSchoolWritingFeature,
+  registerWritingStudentSession,
+  resolveWritingSession,
+  getWritingFeatureStatus,
+  assertWritingEnabledForAuth,
+};
