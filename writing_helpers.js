@@ -4,6 +4,12 @@ const WRITING_MODEL = process.env.WRITING_CORRECTION_MODEL || "gpt-5.6-luna";
 const MAX_TEXT_CHARS = 2500;
 const MAX_TEXT_WORDS = 350;
 const ALLOWED_MODES = new Set(["simple_correction"]);
+const CORRECTION_TYPES = new Set([
+  "spelling",
+  "grammar",
+  "expression",
+  "punctuation",
+]);
 
 class WritingFunctionError extends Error {
   constructor(code, message) {
@@ -82,8 +88,10 @@ const correctionSchema = {
   required: [
     "originalText",
     "correctedText",
+    "improvedText",
     "positiveFeedbackJa",
     "corrections",
+    "improvements",
     "nextTipJa",
     "needsTeacherReview",
     "reviewReasonJa",
@@ -91,6 +99,7 @@ const correctionSchema = {
   properties: {
     originalText: { type: "string" },
     correctedText: { type: "string" },
+    improvedText: { type: "string" },
     positiveFeedbackJa: { type: "string" },
     corrections: {
       type: "array",
@@ -98,10 +107,28 @@ const correctionSchema = {
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["original", "corrected", "reasonJa"],
+        required: ["original", "corrected", "reasonJa", "explanationJa", "type"],
         properties: {
           original: { type: "string" },
           corrected: { type: "string" },
+          reasonJa: { type: "string" },
+          explanationJa: { type: "string" },
+          type: {
+            type: "string",
+            enum: ["spelling", "grammar", "expression", "punctuation"],
+          },
+        },
+      },
+    },
+    improvements: {
+      type: "array",
+      maxItems: 8,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["addedText", "reasonJa"],
+        properties: {
+          addedText: { type: "string" },
           reasonJa: { type: "string" },
         },
       },
@@ -115,7 +142,7 @@ const correctionSchema = {
 function buildCorrectionPayload(text) {
   return {
     model: WRITING_MODEL,
-    max_completion_tokens: 900,
+    max_completion_tokens: 1200,
     response_format: {
       type: "json_schema",
       json_schema: {
@@ -129,12 +156,15 @@ function buildCorrectionPayload(text) {
         role: "system",
         content: [
           "You are an English writing tutor for Japanese junior and senior high school students.",
-          "Check spelling, grammar, and usage.",
-          "Do not rewrite correct sentences just to make them more natural.",
-          "Keep the student's meaning and voice.",
-          "Do not add facts, reasons, or content that the student did not write.",
+          "Return one JSON object that contains both a conservative correction and a better example.",
+          "correctedText: keep the student's meaning. Fix only spelling, grammar, punctuation, word usage, and unnatural expressions. Do not add events, opinions, places, dates, names, or information that the student did not write.",
+          "improvedText: start from correctedText and make it more natural, specific, or connected. Stay close to the student's intent. Do not invent proper nouns, places, dates, experiences, or strong facts that are not in the original. If needed, add only a generic natural sentence.",
+          "If the student's meaning is unclear, do not decide the meaning aggressively. Keep correctedText conservative, keep improvedText modest, set needsTeacherReview=true, and explain why in reviewReasonJa.",
+          "Do not rewrite correct sentences in correctedText just to make them more natural.",
           "Do not penalize repeated expressions if they are grammatically correct.",
-          "Explain corrections in concise Japanese for Japanese students.",
+          "Each correction type must be one of spelling, grammar, expression, punctuation.",
+          "For each correction, reasonJa and explanationJa must both be present and may contain the same concise Japanese explanation.",
+          "Use improvements only for text added or meaningfully improved in improvedText compared with correctedText.",
           "Always return exactly the requested JSON schema.",
         ].join("\n"),
       },
@@ -222,7 +252,7 @@ async function callOpenAiCorrection({
     }
 
     const usage = parsed.usage || {};
-    return validateCorrectionResult(result, {
+    const validated = validateCorrectionResult(result, {
       model: parsed.model || WRITING_MODEL,
       inputTokens: Number.isInteger(usage.prompt_tokens)
         ? usage.prompt_tokens
@@ -230,8 +260,10 @@ async function callOpenAiCorrection({
       outputTokens: Number.isInteger(usage.completion_tokens)
         ? usage.completion_tokens
         : null,
+      totalTokens: Number.isInteger(usage.total_tokens) ? usage.total_tokens : null,
       elapsedMs: 0,
     });
+    return validated;
   } catch (error) {
     if (error && error.name === "AbortError") {
       throw new WritingFunctionError(
@@ -260,8 +292,11 @@ function validateCorrectionResult(value, usage) {
   const result = {
     originalText: requiredString(value, "originalText"),
     correctedText: requiredString(value, "correctedText"),
+    improvedText:
+      optionalString(value, "improvedText") || requiredString(value, "correctedText"),
     positiveFeedbackJa: requiredString(value, "positiveFeedbackJa"),
     corrections: parseCorrections(value.corrections),
+    improvements: parseImprovements(value.improvements),
     nextTipJa: requiredString(value, "nextTipJa"),
     needsTeacherReview: value.needsTeacherReview === true,
     reviewReasonJa:
@@ -288,6 +323,12 @@ function requiredString(obj, key) {
   return obj[key].trim();
 }
 
+function optionalString(obj, key) {
+  return typeof obj[key] === "string" && obj[key].trim()
+    ? obj[key].trim()
+    : null;
+}
+
 function parseCorrections(value) {
   if (!Array.isArray(value)) {
     throw new WritingFunctionError(
@@ -302,9 +343,42 @@ function parseCorrections(value) {
         "Writing添削結果のcorrectionが不正です。"
       );
     }
+    const explanationJa =
+      optionalString(item, "explanationJa") || requiredString(item, "reasonJa");
+    const type = optionalString(item, "type") || "expression";
+    if (!CORRECTION_TYPES.has(type)) {
+      throw new WritingFunctionError(
+        "internal",
+        "Writing添削結果のcorrection typeが不正です。"
+      );
+    }
     return {
       original: requiredString(item, "original"),
       corrected: requiredString(item, "corrected"),
+      reasonJa: explanationJa,
+      explanationJa,
+      type,
+    };
+  });
+}
+
+function parseImprovements(value) {
+  if (value == null) return [];
+  if (!Array.isArray(value)) {
+    throw new WritingFunctionError(
+      "internal",
+      "Writing添削結果のimprovementsが不正です。"
+    );
+  }
+  return value.map((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      throw new WritingFunctionError(
+        "internal",
+        "Writing添削結果のimprovementが不正です。"
+      );
+    }
+    return {
+      addedText: requiredString(item, "addedText"),
       reasonJa: requiredString(item, "reasonJa"),
     };
   });
@@ -334,6 +408,7 @@ module.exports = {
   WritingFunctionError,
   normalizeWritingText,
   countWritingWords,
+  CORRECTION_TYPES,
   validateCorrectWritingInput,
   validateCorrectionResult,
   buildCorrectionPayload,

@@ -67,11 +67,17 @@ exports.correctWriting = onCall(
     });
 
     try {
-      return await correctWritingHandler({
+      const result = await correctWritingHandler({
         data: req.data,
         apiKey: process.env.OPENAI_API_KEY,
         fetchImpl: fetch,
       });
+      console.log("✍️ correctWriting usage", {
+        inputTokens: result.usage?.inputTokens ?? null,
+        outputTokens: result.usage?.outputTokens ?? null,
+        totalTokens: result.usage?.totalTokens ?? null,
+      });
+      return result;
     } catch (error) {
       if (error instanceof WritingFunctionError) {
         throw new HttpsError(error.code, error.message);
