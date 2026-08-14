@@ -6,7 +6,7 @@
 const { setGlobalOptions } = require("firebase-functions/v2");
 const { onObjectFinalized } = require("firebase-functions/v2/storage");
 const { onDocumentCreated } = require("firebase-functions/v2/firestore");
-const { onCall } = require("firebase-functions/v2/https");
+const { onCall, HttpsError } = require("firebase-functions/v2/https");
 const { defineSecret } = require("firebase-functions/params");
 
 const admin = require("firebase-admin");
@@ -15,6 +15,10 @@ const path = require("path");
 const os = require("os");
 const fetch = require("node-fetch");
 const FormData = require("form-data");
+const {
+  correctWritingHandler,
+  WritingFunctionError,
+} = require("./writing_helpers");
 
 // 🔥 ffmpeg（WebM → WAV 変換）
 const ffmpegPath = require("ffmpeg-static");
@@ -36,6 +40,53 @@ setGlobalOptions({
 const OPENAI_API_KEY = defineSecret("OPENAI_API_KEY");
 const SPEECH_KEY = defineSecret("SPEECH_KEY");
 const SPEECH_REGION = defineSecret("SPEECH_REGION");
+
+/* =========================================================
+   ✍️ Writing Mode: English correction for local/emulator use
+   ========================================================= */
+exports.correctWriting = onCall(
+  {
+    region: "asia-northeast1",
+    secrets: [OPENAI_API_KEY],
+    timeoutSeconds: 60,
+    memory: "512MiB",
+  },
+  async (req) => {
+    if (!req.auth || !req.auth.uid) {
+      throw new HttpsError(
+        "unauthenticated",
+        "ログインが必要です。"
+      );
+    }
+
+    const textLength =
+      typeof req.data?.text === "string" ? req.data.text.trim().length : 0;
+    console.log("✍️ correctWriting called", {
+      mode: req.data?.mode || null,
+      textLength,
+    });
+
+    try {
+      return await correctWritingHandler({
+        data: req.data,
+        apiKey: process.env.OPENAI_API_KEY,
+        fetchImpl: fetch,
+      });
+    } catch (error) {
+      if (error instanceof WritingFunctionError) {
+        throw new HttpsError(error.code, error.message);
+      }
+      console.error("🚨 correctWriting failed", {
+        name: error?.name || "Error",
+        message: error?.message || String(error),
+      });
+      throw new HttpsError(
+        "internal",
+        "Writing添削に失敗しました。"
+      );
+    }
+  }
+);
 
 /* =========================================================
    🔧 Path helpers

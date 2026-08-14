@@ -6,6 +6,8 @@
     "serve": "firebase emulators:start --only functions",
     "shell": "firebase functions:shell",
     "start": "npm run shell",
+    "test": "node test/writing_helpers.test.js",
+    "build": "node --check index.js && node --check writing_helpers.js",
     "deploy": "firebase deploy --only functions",
     "logs": "firebase functions:log"
   },
