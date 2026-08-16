@@ -17,6 +17,7 @@ const fetch = require("node-fetch");
 const FormData = require("form-data");
 const {
   correctWritingHandler,
+  extractWritingTextFromImageHandler,
   WritingFunctionError,
 } = require("./writing_helpers");
 const {
@@ -220,6 +221,64 @@ exports.correctWriting = onCall(
       throw new HttpsError(
         "internal",
         "Writing添削に失敗しました。"
+      );
+    }
+  }
+);
+
+exports.extractWritingTextFromImage = onCall(
+  {
+    region: "asia-northeast1",
+    secrets: [OPENAI_API_KEY],
+    timeoutSeconds: 60,
+    memory: "512MiB",
+  },
+  async (req) => {
+    if (!req.auth || !req.auth.uid) {
+      throw new HttpsError(
+        "unauthenticated",
+        "ログインが必要です。"
+      );
+    }
+
+    const imageLength =
+      typeof req.data?.imageBase64 === "string" ? req.data.imageBase64.length : 0;
+    console.log("🖼️ extractWritingTextFromImage called", {
+      mimeType: req.data?.mimeType || null,
+      imageChars: imageLength,
+    });
+
+    try {
+      if (enforceWritingAccess) {
+        await assertWritingEnabledForAuth({
+          db,
+          authUid: req.auth.uid,
+        });
+      }
+
+      const result = await extractWritingTextFromImageHandler({
+        data: req.data,
+        apiKey: process.env.OPENAI_API_KEY,
+        fetchImpl: fetch,
+      });
+      console.log("🖼️ extractWritingTextFromImage usage", {
+        inputTokens: result.usage?.inputTokens ?? null,
+        outputTokens: result.usage?.outputTokens ?? null,
+        totalTokens: result.usage?.totalTokens ?? null,
+      });
+      return result;
+    } catch (error) {
+      if (error instanceof WritingAccessError) throw toHttpsError(error);
+      if (error instanceof WritingFunctionError) {
+        throw new HttpsError(error.code, error.message);
+      }
+      console.error("🚨 extractWritingTextFromImage failed", {
+        name: error?.name || "Error",
+        message: error?.message || String(error),
+      });
+      throw new HttpsError(
+        "internal",
+        "Writing OCRに失敗しました。"
       );
     }
   }

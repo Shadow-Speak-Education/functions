@@ -4,8 +4,11 @@ const assert = require("assert");
 const {
   WritingFunctionError,
   buildCorrectionPayload,
+  buildOcrPayload,
   correctWritingHandler,
+  extractWritingTextFromImageHandler,
   validateCorrectWritingInput,
+  validateOcrInput,
   validateCorrectionResult,
 } = require("../writing_helpers");
 
@@ -116,6 +119,59 @@ async function test(name, fn) {
     assert(payload.response_format.json_schema.schema.required.includes("improvements"));
     assert(payload.messages[0].content.includes("correctedText"));
     assert(payload.messages[0].content.includes("improvedText"));
+  });
+
+  await test("ocr payload uses image input and json_schema", () => {
+    const payload = buildOcrPayload({
+      imageBase64: "aGVsbG8=",
+      mimeType: "image/jpeg",
+    });
+    assert.strictEqual(payload.response_format.type, "json_schema");
+    assert.strictEqual(payload.response_format.json_schema.strict, true);
+    assert(payload.messages[1].content.some((part) => part.type === "image_url"));
+    assert(!JSON.stringify(payload.messages[0]).includes("correctedText"));
+  });
+
+  await test("ocr rejects unsupported image type", () => {
+    assert.throws(
+      () => validateOcrInput({ imageBase64: "aGVsbG8=", mimeType: "image/gif" }),
+      /画像形式/
+    );
+  });
+
+  await test("ocr returns transcribed text with mocked OpenAI", async () => {
+    let calls = 0;
+    const result = await extractWritingTextFromImageHandler({
+      data: {
+        imageBase64: "aGVsbG8=",
+        mimeType: "image/jpeg",
+      },
+      apiKey: "test-key",
+      fetchImpl: async (_url, options) => {
+        calls += 1;
+        const body = JSON.parse(options.body);
+        assert.strictEqual(body.response_format.type, "json_schema");
+        assert(JSON.stringify(body).includes("data:image/jpeg;base64,aGVsbG8="));
+        return makeFetchResponse({
+          body: openAiBody({
+            transcribedText: "I often plaied soccer.",
+            uncertainParts: [
+              {
+                text: "plaied",
+                reasonJa: "手書きが少し不鮮明です。",
+              },
+            ],
+            hasUnreadableText: false,
+            warningJa: null,
+          }),
+        });
+      },
+    });
+
+    assert.strictEqual(result.transcribedText, "I often plaied soccer.");
+    assert.strictEqual(result.uncertainParts.length, 1);
+    assert.strictEqual(result.usage.model, "gpt-5.6-luna");
+    assert.strictEqual(calls, 1);
   });
 
   await test("returns normal schema with mocked OpenAI", async () => {

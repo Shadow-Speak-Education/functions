@@ -1,8 +1,10 @@
 "use strict";
 
 const WRITING_MODEL = process.env.WRITING_CORRECTION_MODEL || "gpt-5.6-luna";
+const WRITING_OCR_MODEL = process.env.WRITING_OCR_MODEL || WRITING_MODEL;
 const MAX_TEXT_CHARS = 2500;
 const MAX_TEXT_WORDS = 350;
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 const ALLOWED_MODES = new Set(["simple_correction"]);
 const CORRECTION_TYPES = new Set([
   "spelling",
@@ -139,6 +141,35 @@ const correctionSchema = {
   },
 };
 
+const ocrSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: [
+    "transcribedText",
+    "uncertainParts",
+    "hasUnreadableText",
+    "warningJa",
+  ],
+  properties: {
+    transcribedText: { type: "string" },
+    uncertainParts: {
+      type: "array",
+      maxItems: 12,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["text", "reasonJa"],
+        properties: {
+          text: { type: "string" },
+          reasonJa: { type: "string" },
+        },
+      },
+    },
+    hasUnreadableText: { type: "boolean" },
+    warningJa: { type: ["string", "null"] },
+  },
+};
+
 function buildCorrectionPayload(text) {
   return {
     model: WRITING_MODEL,
@@ -176,6 +207,86 @@ function buildCorrectionPayload(text) {
           text,
           outputLanguage: "ja",
         }),
+      },
+    ],
+  };
+}
+
+function validateOcrInput(data) {
+  const imageBase64 = typeof data?.imageBase64 === "string"
+    ? data.imageBase64.trim()
+    : "";
+  const mimeType = typeof data?.mimeType === "string"
+    ? data.mimeType.trim().toLowerCase()
+    : "";
+
+  if (!["image/jpeg", "image/png", "image/webp"].includes(mimeType)) {
+    throw new WritingFunctionError(
+      "invalid-argument",
+      "画像形式はJPEG、PNG、WebPにしてください。"
+    );
+  }
+  if (!imageBase64) {
+    throw new WritingFunctionError(
+      "invalid-argument",
+      "画像を選択してください。"
+    );
+  }
+  if (!/^[A-Za-z0-9+/=]+$/.test(imageBase64)) {
+    throw new WritingFunctionError(
+      "invalid-argument",
+      "画像データの形式が不正です。"
+    );
+  }
+
+  const sizeBytes = Math.floor((imageBase64.length * 3) / 4);
+  if (sizeBytes > MAX_IMAGE_BYTES) {
+    throw new WritingFunctionError(
+      "invalid-argument",
+      "画像サイズが大きすぎます。5MB以下の画像を使ってください。"
+    );
+  }
+
+  return { imageBase64, mimeType, sizeBytes };
+}
+
+function buildOcrPayload({ imageBase64, mimeType }) {
+  return {
+    model: WRITING_OCR_MODEL,
+    max_completion_tokens: 500,
+    response_format: {
+      type: "json_schema",
+      json_schema: {
+        name: "writing_ocr_result",
+        strict: true,
+        schema: ocrSchema,
+      },
+    },
+    messages: [
+      {
+        role: "system",
+        content: [
+          "You extract handwritten or printed English from a student photo.",
+          "Return JSON only. Do not correct grammar or spelling. Preserve the student's English as written.",
+          "If a word is unclear, transcribe the best guess and include it in uncertainParts. Use [不明] only when unreadable.",
+          "If the image is mirrored, rotated, upside down, or partially blocked, still read the English as naturally as possible.",
+          "Do not include personal information unrelated to the English writing task.",
+        ].join("\n"),
+      },
+      {
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text: "Read only the English writing in this image. Preserve line breaks when useful.",
+          },
+          {
+            type: "image_url",
+            image_url: {
+              url: `data:${mimeType};base64,${imageBase64}`,
+            },
+          },
+        ],
       },
     ],
   };
@@ -273,6 +384,104 @@ async function callOpenAiCorrection({
     throw new WritingFunctionError(
       "unavailable",
       "Writing添削APIの呼び出しに失敗しました。"
+    );
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function callOpenAiOcr({
+  imageBase64,
+  mimeType,
+  apiKey,
+  fetchImpl,
+  timeoutMs = 30000,
+}) {
+  if (!apiKey) {
+    throw new WritingFunctionError(
+      "failed-precondition",
+      "Writing OCR APIが設定されていません。"
+    );
+  }
+  if (typeof fetchImpl !== "function") {
+    throw new WritingFunctionError(
+      "internal",
+      "Writing OCR APIの呼び出し設定が不正です。"
+    );
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetchImpl("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(buildOcrPayload({ imageBase64, mimeType })),
+      signal: controller.signal,
+    });
+
+    const responseText = await response.text();
+    if (!response.ok) {
+      throw new WritingFunctionError(
+        "unavailable",
+        `Writing OCR APIでエラーが発生しました。status=${response.status}`
+      );
+    }
+
+    let parsed;
+    try {
+      parsed = JSON.parse(responseText);
+    } catch (_) {
+      throw new WritingFunctionError(
+        "internal",
+        "Writing OCR APIの応答形式が不正です。"
+      );
+    }
+
+    const content = extractMessageContent(parsed);
+    if (!content) {
+      throw new WritingFunctionError(
+        "internal",
+        "Writing OCR APIの応答に本文がありません。"
+      );
+    }
+
+    let result;
+    try {
+      result = JSON.parse(extractJsonObjectText(content));
+    } catch (_) {
+      throw new WritingFunctionError(
+        "internal",
+        "Writing OCR APIのJSONを解析できませんでした。"
+      );
+    }
+
+    const usage = parsed.usage || {};
+    return validateOcrResult(result, {
+      model: parsed.model || WRITING_OCR_MODEL,
+      inputTokens: Number.isInteger(usage.prompt_tokens)
+        ? usage.prompt_tokens
+        : null,
+      outputTokens: Number.isInteger(usage.completion_tokens)
+        ? usage.completion_tokens
+        : null,
+      totalTokens: Number.isInteger(usage.total_tokens) ? usage.total_tokens : null,
+      elapsedMs: 0,
+    });
+  } catch (error) {
+    if (error && error.name === "AbortError") {
+      throw new WritingFunctionError(
+        "deadline-exceeded",
+        "Writing OCR APIがタイムアウトしました。"
+      );
+    }
+    if (error instanceof WritingFunctionError) throw error;
+    throw new WritingFunctionError(
+      "unavailable",
+      "Writing OCR APIの呼び出しに失敗しました。"
     );
   } finally {
     clearTimeout(timer);
@@ -421,6 +630,47 @@ function parseImprovements(value) {
   });
 }
 
+function validateOcrResult(value, usage) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new WritingFunctionError(
+      "internal",
+      "Writing OCR結果の形式が不正です。"
+    );
+  }
+  const text = typeof value.transcribedText === "string"
+    ? value.transcribedText
+        .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "")
+        .trim()
+    : "";
+  if (!text) {
+    throw new WritingFunctionError(
+      "internal",
+      "Writing OCR結果に英文がありません。"
+    );
+  }
+
+  const uncertainParts = Array.isArray(value.uncertainParts)
+    ? value.uncertainParts
+        .filter((item) => item && typeof item === "object")
+        .map((item) => ({
+          text: optionalString(item, "text") || "[不明]",
+          reasonJa:
+            optionalString(item, "reasonJa") ||
+            "読み取りが不確かな箇所です。写真を見ながら確認してください。",
+        }))
+        .slice(0, 12)
+    : [];
+
+  return {
+    transcribedText: text,
+    uncertainParts,
+    hasUnreadableText:
+      value.hasUnreadableText === true || text.includes("[不明]"),
+    warningJa: optionalString(value, "warningJa"),
+    usage,
+  };
+}
+
 async function correctWritingHandler({ data, apiKey, fetchImpl }) {
   const startedAt = Date.now();
   const { text } = validateCorrectWritingInput(data);
@@ -438,19 +688,46 @@ async function correctWritingHandler({ data, apiKey, fetchImpl }) {
   };
 }
 
+async function extractWritingTextFromImageHandler({ data, apiKey, fetchImpl }) {
+  const startedAt = Date.now();
+  const input = validateOcrInput(data);
+  const result = await callOpenAiOcr({
+    ...input,
+    apiKey,
+    fetchImpl,
+  });
+
+  return {
+    ...result,
+    usage: {
+      ...result.usage,
+      model: result.usage.model || WRITING_OCR_MODEL,
+      elapsedMs: Date.now() - startedAt,
+      estimatedCost: null,
+    },
+  };
+}
+
 module.exports = {
   WRITING_MODEL,
+  WRITING_OCR_MODEL,
   MAX_TEXT_CHARS,
   MAX_TEXT_WORDS,
+  MAX_IMAGE_BYTES,
   WritingFunctionError,
   normalizeWritingText,
   countWritingWords,
   CORRECTION_TYPES,
   validateCorrectWritingInput,
+  validateOcrInput,
   validateCorrectionResult,
+  validateOcrResult,
   buildCorrectionPayload,
+  buildOcrPayload,
   callOpenAiCorrection,
+  callOpenAiOcr,
   extractMessageContent,
   extractJsonObjectText,
   correctWritingHandler,
+  extractWritingTextFromImageHandler,
 };
