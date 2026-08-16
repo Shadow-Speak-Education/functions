@@ -26,6 +26,7 @@ const {
   getWritingFeatureStatus,
   setSchoolWritingFeature,
   assertWritingEnabledForAuth,
+  recordDemoWritingAttempt,
 } = require("./writing_access");
 
 // 🔥 ffmpeg（WebM → WAV 変換）
@@ -166,10 +167,34 @@ exports.correctWriting = onCall(
 
     try {
       if (enforceWritingAccess) {
-        await assertWritingEnabledForAuth({
+        const writingStatus = await assertWritingEnabledForAuth({
           db,
           authUid: req.auth.uid,
         });
+        const demoSchoolId = process.env.WRITING_DEMO_SCHOOL_ID || "";
+        if (
+          demoSchoolId &&
+          process.env.FUNCTIONS_EMULATOR === "true" &&
+          writingStatus.schoolId !== demoSchoolId
+        ) {
+          throw new HttpsError(
+            "permission-denied",
+            "このローカルデモ用学校ではありません。"
+          );
+        }
+        const demoUsage = await recordDemoWritingAttempt({
+          db,
+          admin,
+          authUid: req.auth.uid,
+          maxAttempts: process.env.WRITING_DEMO_MAX_CORRECTIONS,
+        });
+        if (demoUsage) {
+          console.log("✍️ correctWriting demo usage", {
+            schoolId: writingStatus.schoolId,
+            used: demoUsage.used,
+            limit: demoUsage.limit,
+          });
+        }
       }
 
       const result = await correctWritingHandler({

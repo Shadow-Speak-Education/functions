@@ -1,8 +1,10 @@
 "use strict";
 
 const { HttpsError } = require("firebase-functions/v2/https");
+const { FieldValue } = require("firebase-admin/firestore");
 
 const SESSION_COLLECTION = "writingAuthSessions";
+const FEATURE_FLAGS_COLLECTION = "writingFeatureFlags";
 const ID_PATTERN = /^[A-Za-z0-9._:-]{1,160}$/;
 
 class WritingAccessError extends Error {
@@ -38,11 +40,8 @@ function cleanPassword(value) {
   return text;
 }
 
-function isWritingEnabledFromSchoolData(data) {
-  return data &&
-    data.features &&
-    data.features.writing &&
-    data.features.writing.enabled === true;
+function isWritingEnabledFromFeatureFlagData(data) {
+  return data && data.enabled === true;
 }
 
 async function requireOperationAdmin({ db, uid }) {
@@ -72,11 +71,15 @@ async function setSchoolWritingFeature({ db, admin, uid, data }) {
     throw new WritingAccessError("not-found", "対象の学校が見つかりません。");
   }
 
-  await schoolRef.update({
-    "features.writing.enabled": data.enabled,
-    "features.writing.updatedAt": admin.firestore.FieldValue.serverTimestamp(),
-    "features.writing.updatedBy": uid,
-  });
+  await db.collection(FEATURE_FLAGS_COLLECTION).doc(schoolId).set(
+    {
+      enabled: data.enabled,
+      schoolId,
+      updatedAt: FieldValue.serverTimestamp(),
+      updatedBy: uid,
+    },
+    { merge: true }
+  );
 
   return {
     schoolId,
@@ -115,7 +118,7 @@ async function registerWritingStudentSession({ db, admin, authUid, data }) {
     );
   }
 
-  const now = admin.firestore.FieldValue.serverTimestamp();
+  const now = FieldValue.serverTimestamp();
   await db.collection(SESSION_COLLECTION).doc(uid).set(
     {
       schoolId,
@@ -173,9 +176,12 @@ async function resolveWritingSession({ db, authUid }) {
 
 async function getWritingFeatureStatus({ db, authUid }) {
   const session = await resolveWritingSession({ db, authUid });
-  const schoolSnap = await db.collection("schools").doc(session.schoolId).get();
-  const enabled = schoolSnap.exists
-    ? isWritingEnabledFromSchoolData(schoolSnap.data()) === true
+  const flagSnap = await db
+    .collection(FEATURE_FLAGS_COLLECTION)
+    .doc(session.schoolId)
+    .get();
+  const enabled = flagSnap.exists
+    ? isWritingEnabledFromFeatureFlagData(flagSnap.data()) === true
     : false;
   return {
     enabled,
@@ -194,16 +200,58 @@ async function assertWritingEnabledForAuth({ db, authUid }) {
   return status;
 }
 
+async function recordDemoWritingAttempt({ db, admin, authUid, maxAttempts }) {
+  const limit = Number(maxAttempts || 0);
+  if (!Number.isFinite(limit) || limit <= 0) return null;
+
+  const uid = cleanId(authUid, "認証UID");
+  const sessionRef = db.collection(SESSION_COLLECTION).doc(uid);
+  const result = await db.runTransaction(async (transaction) => {
+    const snap = await transaction.get(sessionRef);
+    const session = snap.exists ? snap.data() : null;
+    if (!session || session.active !== true) {
+      throw new WritingAccessError(
+        "permission-denied",
+        "Writing機能を利用できません。"
+      );
+    }
+
+    const used = Number(session.demoCorrectionCount || 0);
+    if (used >= limit) {
+      throw new WritingAccessError(
+        "resource-exhausted",
+        `ローカルデモの添削上限（${limit}回）に達しました。Emulatorをseedし直してから再開してください。`
+      );
+    }
+
+    const nextCount = used + 1;
+    transaction.set(
+      sessionRef,
+      {
+        demoCorrectionCount: nextCount,
+        demoCorrectionLimit: limit,
+        demoLastCorrectionAt: FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    );
+    return { used: nextCount, limit };
+  });
+
+  return result;
+}
+
 module.exports = {
   SESSION_COLLECTION,
+  FEATURE_FLAGS_COLLECTION,
   WritingAccessError,
   toHttpsError,
   cleanId,
-  isWritingEnabledFromSchoolData,
+  isWritingEnabledFromFeatureFlagData,
   requireOperationAdmin,
   setSchoolWritingFeature,
   registerWritingStudentSession,
   resolveWritingSession,
   getWritingFeatureStatus,
   assertWritingEnabledForAuth,
+  recordDemoWritingAttempt,
 };

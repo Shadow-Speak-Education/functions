@@ -3,7 +3,7 @@
 const assert = require("assert");
 const {
   WritingAccessError,
-  isWritingEnabledFromSchoolData,
+  isWritingEnabledFromFeatureFlagData,
   registerWritingStudentSession,
   getWritingFeatureStatus,
   assertWritingEnabledForAuth,
@@ -119,14 +119,10 @@ async function test(name, fn) {
 
 function baseDb({ writingEnabled } = {}) {
   const school = { schoolName: "テスト高校" };
-  if (writingEnabled !== undefined) {
-    school.features = { writing: { enabled: writingEnabled } };
-  }
-  return new FakeFirestore({
+  const initial = {
     "schools/schoolA": school,
     "schools/schoolB": {
       schoolName: "別学校",
-      features: { writing: { enabled: true } },
     },
     "schools/schoolA/students/student1": {
       loginId: "s001",
@@ -134,7 +130,18 @@ function baseDb({ writingEnabled } = {}) {
     },
     "admins/admin1": { active: true },
     "admins/teacher1": { active: false },
-  });
+    "writingFeatureFlags/schoolB": {
+      schoolId: "schoolB",
+      enabled: true,
+    },
+  };
+  if (writingEnabled !== undefined) {
+    initial["writingFeatureFlags/schoolA"] = {
+      schoolId: "schoolA",
+      enabled: writingEnabled,
+    };
+  }
+  return new FakeFirestore(initial);
 }
 
 (async () => {
@@ -215,8 +222,8 @@ function baseDb({ writingEnabled } = {}) {
       },
     });
     assert.strictEqual(
-      isWritingEnabledFromSchoolData(
-        (await db.collection("schools").doc("schoolB").get()).data()
+      isWritingEnabledFromFeatureFlagData(
+        (await db.collection("writingFeatureFlags").doc("schoolB").get()).data()
       ),
       true
     );
@@ -246,8 +253,11 @@ function baseDb({ writingEnabled } = {}) {
       data: { schoolId: "schoolA", enabled: true },
     });
     assert.deepStrictEqual(result, { schoolId: "schoolA", enabled: true });
-    const schoolA = (await db.collection("schools").doc("schoolA").get()).data();
-    assert.strictEqual(schoolA.features.writing.enabled, true);
+    const flag = (
+      await db.collection("writingFeatureFlags").doc("schoolA").get()
+    ).data();
+    assert.strictEqual(flag.enabled, true);
+    assert.strictEqual(flag.schoolId, "schoolA");
   });
 
   await test("invalid password does not bind auth UID", async () => {

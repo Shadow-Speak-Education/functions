@@ -159,12 +159,13 @@ function buildCorrectionPayload(text) {
           "Return one JSON object that contains both a conservative correction and a better example.",
           "correctedText: keep the student's meaning. Fix only spelling, grammar, punctuation, word usage, and unnatural expressions. Do not add events, opinions, places, dates, names, or information that the student did not write.",
           "improvedText: start from correctedText and make it more natural, specific, or connected. Stay close to the student's intent. Do not invent proper nouns, places, dates, experiences, or strong facts that are not in the original. If needed, add only a generic natural sentence.",
+          "For a short sentence where correctedText is already natural, improvedText should still usually show a modest better example by adding one safe, generic sentence that follows from the student's topic. Example: if the student writes about playing soccer after school, you may add a generic sentence such as enjoying it or relaxing with friends, but do not invent a team name, place, score, date, or event.",
           "If the student's meaning is unclear, do not decide the meaning aggressively. Keep correctedText conservative, keep improvedText modest, set needsTeacherReview=true, and explain why in reviewReasonJa.",
           "Do not rewrite correct sentences in correctedText just to make them more natural.",
           "Do not penalize repeated expressions if they are grammatically correct.",
           "Each correction type must be one of spelling, grammar, expression, punctuation.",
           "For each correction, reasonJa and explanationJa must both be present and may contain the same concise Japanese explanation.",
-          "Use improvements only for text added or meaningfully improved in improvedText compared with correctedText.",
+          "Use improvements for text added or meaningfully improved in improvedText compared with correctedText. If you add a generic sentence, include it in improvements.",
           "Always return exactly the requested JSON schema.",
         ].join("\n"),
       },
@@ -230,11 +231,8 @@ async function callOpenAiCorrection({
       );
     }
 
-    const content = parsed.choices &&
-      parsed.choices[0] &&
-      parsed.choices[0].message &&
-      parsed.choices[0].message.content;
-    if (typeof content !== "string") {
+    const content = extractMessageContent(parsed);
+    if (!content) {
       throw new WritingFunctionError(
         "internal",
         "Writing添削APIの応答に本文がありません。"
@@ -243,7 +241,7 @@ async function callOpenAiCorrection({
 
     let result;
     try {
-      result = JSON.parse(content);
+      result = JSON.parse(extractJsonObjectText(content));
     } catch (_) {
       throw new WritingFunctionError(
         "internal",
@@ -279,6 +277,45 @@ async function callOpenAiCorrection({
   } finally {
     clearTimeout(timer);
   }
+}
+
+function extractMessageContent(parsed) {
+  const content = parsed.choices &&
+    parsed.choices[0] &&
+    parsed.choices[0].message &&
+    parsed.choices[0].message.content;
+
+  if (typeof content === "string") return content.trim();
+  if (Array.isArray(content)) {
+    return content.map((part) => {
+      if (typeof part === "string") return part;
+      if (part && typeof part.text === "string") return part.text;
+      if (part && typeof part.content === "string") return part.content;
+      return "";
+    }).join("").trim();
+  }
+  return "";
+}
+
+function extractJsonObjectText(content) {
+  const text = String(content || "").trim();
+  if (text.startsWith("{") && text.endsWith("}")) return text;
+
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fenced && fenced[1]) {
+    const candidate = fenced[1].trim();
+    if (candidate.startsWith("{") && candidate.endsWith("}")) {
+      return candidate;
+    }
+  }
+
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start >= 0 && end > start) {
+    return text.slice(start, end + 1);
+  }
+
+  return text;
 }
 
 function validateCorrectionResult(value, usage) {
@@ -413,5 +450,7 @@ module.exports = {
   validateCorrectionResult,
   buildCorrectionPayload,
   callOpenAiCorrection,
+  extractMessageContent,
+  extractJsonObjectText,
   correctWritingHandler,
 };
