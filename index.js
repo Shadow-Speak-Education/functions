@@ -6,10 +6,11 @@
 const { setGlobalOptions } = require("firebase-functions/v2");
 const { onObjectFinalized } = require("firebase-functions/v2/storage");
 const { onDocumentCreated } = require("firebase-functions/v2/firestore");
-const { onCall } = require("firebase-functions/v2/https");
+const { onCall, HttpsError } = require("firebase-functions/v2/https");
 const { defineSecret } = require("firebase-functions/params");
 
 const admin = require("firebase-admin");
+
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
@@ -21,7 +22,10 @@ const ffmpegPath = require("ffmpeg-static");
 const ffmpeg = require("fluent-ffmpeg");
 
 // ---- Firebase init
-admin.initializeApp({ projectId: "shadow-speak-school" });
+admin.initializeApp({
+  projectId: "shadow-speak-school",
+  storageBucket: "shadow-speak-school.firebasestorage.app",
+});
 const db = admin.firestore();
 const storage = admin.storage();
 
@@ -53,6 +57,11 @@ function isAudioFile(p) {
 function isSubtitlesJson(p) {
   return typeof p === "string" && p.toLowerCase().endsWith("_subtitles.json");
 }
+function toJaSubtitlesPath(filePath) {
+  if (typeof filePath !== "string") return null;
+  if (!filePath.toLowerCase().endsWith("_subtitles.json")) return null;
+  return filePath.replace(/_subtitles\.json$/i, "_ja.json");
+}
 function isDictationJson(p) {
   return isOfficialPath(p) && p.toLowerCase().endsWith("/dictation.json");
 }
@@ -62,7 +71,56 @@ function isOfficialTxt(p) {
 function toDocIdFromPath(p) {
   return (p || "").replace(/\//g, "__");
 }
+function buildSubtitleJsonPath(filePath) {
+  if (typeof filePath !== "string") return null;
 
+  // school_materials/.../audio/xxx.mp3
+  // → school_materials/.../subtitles/xxx_subtitles.json
+  if (filePath.startsWith("school_materials/")) {
+    return filePath
+      .replace(/\/audio\//i, "/subtitles/")
+      .replace(/\.(wav|mp3|m4a|aac|ogg)$/i, "_subtitles.json");
+  }
+
+  // uploads/.../audio/xxx.mp3
+  // → uploads/.../subtitles/xxx_subtitles.json
+  if (filePath.startsWith("uploads/")) {
+    return filePath
+      .replace(/\/audio\//i, "/subtitles/")
+      .replace(/\.(wav|mp3|m4a|aac|ogg)$/i, "_subtitles.json");
+  }
+
+  // official は従来どおり
+  return filePath.replace(
+    /\.(wav|mp3|m4a|aac|ogg)$/i,
+    "_subtitles.json"
+  );
+}
+function buildWaveformJsonPath(filePath) {
+  if (typeof filePath !== "string") return null;
+
+  // school_materials/.../audio/xxx.wav
+  // → school_materials/.../waveforms/xxx_waveform.json
+  if (filePath.startsWith("school_materials/")) {
+    return filePath
+      .replace(/\/audio\//i, "/waveforms/")
+      .replace(/\.(wav|mp3|m4a|aac|ogg)$/i, "_waveform.json");
+  }
+
+  // uploads/.../audio/xxx.wav
+  // → uploads/.../waveforms/xxx_waveform.json
+  if (filePath.startsWith("uploads/")) {
+    return filePath
+      .replace(/\/audio\//i, "/waveforms/")
+      .replace(/\.(wav|mp3|m4a|aac|ogg)$/i, "_waveform.json");
+  }
+
+  // official は音声と同じ場所に作る
+  return filePath.replace(
+    /\.(wav|mp3|m4a|aac|ogg)$/i,
+    "_waveform.json"
+  );
+}
 function extractMetaFromOfficialPath(filePath) {
   const parts = (filePath || "").split("/");
 
@@ -97,14 +155,14 @@ const LEVEL_RATE = {
 
 // パターンごとに声を変えたいならここで差し替える
 const PATTERN_VOICE = {
-  A: "en-US-GuyNeural",
-  B: "en-US-JennyNeural",
-  C: "en-US-AriaNeural",
-  D: "en-US-DavisNeural",
-  E: "en-US-AmberNeural",
+  A: "en-US-DavisNeural",
+  B: "en-US-BrandonNeural",
+  C: "en-US-JennyNeural",
+  D: "en-US-GuyNeural",
+  E: "en-US-AriaNeural",
   F: "en-US-BrandonNeural",
-  evaluation: "en-US-JennyNeural",
 };
+
 
 function pickVoiceName({ pattern }) {
   return PATTERN_VOICE[pattern] || "en-US-JennyNeural";
@@ -153,7 +211,9 @@ function upsertSortedImagePaths(existing = [], addPath) {
   return arr;
 }
 
-exports.buildLegacyMaterialsOnOfficialUpload = onObjectFinalized(async (event) => {
+exports.buildLegacyMaterialsOnOfficialUpload = onObjectFinalized(
+  { region: "asia-northeast1", timeoutSeconds: 540, memory: "1GiB" },
+  async (event) =>{
   const filePath = event.data.name;
   if (!filePath) return;
 
@@ -282,7 +342,10 @@ exports.convertWebmToWav = onObjectFinalized(
 
     await new Promise((resolve, reject) => {
       ffmpeg(tmpIn)
-        .toFormat("wav")
+       .audioCodec("pcm_s16le")
+    .audioChannels(1)
+       .audioFrequency(16000)
+       .toFormat("wav")
         .on("end", () => resolve())
         .on("error", reject)
         .save(tmpOut);
@@ -300,120 +363,351 @@ exports.convertWebmToWav = onObjectFinalized(
   }
 );
 
-/* =========================================================
-   🧠 2) Whisper 呼び出し
-   ========================================================= */
-async function callWhisperVerboseJson(tmpPath, { wantWords = true } = {}) {
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) throw new Error("OPENAI_API_KEY missing");
+async function convertTo16kMonoWav(inputPath, outputPath) {
+  ffmpeg.setFfmpegPath(ffmpegPath);
 
-  const form = new FormData();
-  form.append("file", fs.createReadStream(tmpPath));
-  form.append("model", "whisper-1");
-  form.append("response_format", "verbose_json");
-  if (wantWords) form.append("timestamp_granularities[]", "word");
-  form.append("timestamp_granularities[]", "segment");
+  await new Promise((resolve, reject) => {
+    ffmpeg(inputPath)
+      .audioCodec("pcm_s16le")
+      .audioChannels(1)
+      .audioFrequency(16000)
+      .toFormat("wav")
+      .on("end", resolve)
+      .on("error", reject)
+      .save(outputPath);
+  });
+}
 
-  const res = await fetch("https://api.openai.com/v1/audio/transcriptions", {
-    method: "POST",
-    headers: { Authorization: `Bearer ${apiKey}`, ...form.getHeaders() },
-    body: form,
+
+function findWavChunk(buffer, chunkName) {
+  if (buffer.length < 12) return null;
+  if (buffer.toString("ascii", 0, 4) !== "RIFF") return null;
+  if (buffer.toString("ascii", 8, 12) !== "WAVE") return null;
+
+  let offset = 12;
+
+  while (offset + 8 <= buffer.length) {
+    const id = buffer.toString("ascii", offset, offset + 4);
+    const size = buffer.readUInt32LE(offset + 4);
+    const start = offset + 8;
+
+    if (id === chunkName) {
+      return { start, size };
+    }
+
+    offset = start + size + (size % 2);
+  }
+
+  return null;
+}
+
+function createWaveformJsonFromWavFile(
+  wavPath,
+  { samplesPerSecond = 100 } = {}
+) {
+  const buffer = fs.readFileSync(wavPath);
+
+  const fmt = findWavChunk(buffer, "fmt ");
+  const data = findWavChunk(buffer, "data");
+
+  if (!fmt || !data) {
+    throw new Error("Invalid WAV: fmt/data chunk not found");
+  }
+
+  const audioFormat = buffer.readUInt16LE(fmt.start);
+  const channels = buffer.readUInt16LE(fmt.start + 2);
+  const sampleRate = buffer.readUInt32LE(fmt.start + 4);
+  const bitsPerSample = buffer.readUInt16LE(fmt.start + 14);
+
+  // 1 = PCM, 65534 = WAVE_FORMAT_EXTENSIBLE
+  if (audioFormat !== 1 && audioFormat !== 65534) {
+    throw new Error(`Unsupported WAV format: ${audioFormat}`);
+  }
+
+  if (bitsPerSample !== 16) {
+    throw new Error(`Unsupported bitsPerSample: ${bitsPerSample}`);
+  }
+
+  if (channels <= 0 || sampleRate <= 0) {
+    throw new Error(
+      `Invalid WAV info: channels=${channels}, sampleRate=${sampleRate}`
+    );
+  }
+
+  const bytesPerSample = bitsPerSample / 8;
+  const frameSize = channels * bytesPerSample;
+  const totalFrames = Math.floor(data.size / frameSize);
+  const windowFrames = Math.max(1, Math.floor(sampleRate / samplesPerSecond));
+
+  const raw = [];
+
+  for (let frameStart = 0; frameStart < totalFrames; frameStart += windowFrames) {
+    const frameEnd = Math.min(totalFrames, frameStart + windowFrames);
+
+    let sumSq = 0;
+    let count = 0;
+
+    for (let frame = frameStart; frame < frameEnd; frame++) {
+      const base = data.start + frame * frameSize;
+      let peak = 0;
+
+      for (let ch = 0; ch < channels; ch++) {
+        const pos = base + ch * bytesPerSample;
+        if (pos + 2 > buffer.length) continue;
+
+        const sample = buffer.readInt16LE(pos);
+        const amp = Math.abs(sample) / 32768;
+        if (amp > peak) peak = amp;
+      }
+
+      sumSq += peak * peak;
+      count++;
+    }
+
+    const rms = Math.sqrt(sumSq / Math.max(1, count));
+    raw.push(rms);
+  }
+
+  let maxRms = 0.00001;
+  for (const v of raw) {
+    if (v > maxRms) maxRms = v;
+  }
+
+  const values = raw.map((v) => {
+    const normalized = Math.round((v / maxRms) * 255);
+    return Math.max(0, Math.min(255, normalized));
   });
 
-  const json = await res.json();
-  if (!res.ok) throw new Error(JSON.stringify(json));
-  return json;
+  const durationMs = Math.round((totalFrames / sampleRate) * 1000);
+
+  return {
+    version: 1,
+    durationMs,
+    samplesPerSecond,
+    values,
+  };
+}
+
+async function saveWaveformJsonFromWav({
+  bucket,
+  wavPath,
+  waveformStoragePath,
+  samplesPerSecond = 100,
+}) {
+  if (!waveformStoragePath) return null;
+
+  const [exists] = await bucket.file(waveformStoragePath).exists();
+  if (exists) {
+    console.log("⏭ waveform json already exists. skip:", waveformStoragePath);
+
+    const [existingBuf] = await bucket.file(waveformStoragePath).download();
+    return JSON.parse(existingBuf.toString("utf-8"));
+  }
+
+  const waveform = createWaveformJsonFromWavFile(wavPath, {
+    samplesPerSecond,
+  });
+
+  await bucket.file(waveformStoragePath).save(
+    JSON.stringify(waveform),
+    {
+      resumable: false,
+      metadata: {
+        contentType: "application/json; charset=utf-8",
+        cacheControl: "no-cache",
+      },
+    }
+  );
+
+  console.log("✅ waveform json saved:", waveformStoragePath);
+
+  return waveform;
 }
 
 /* =========================================================
-   🪄 3) Whisper → アプリ用 JSON（words fallback付き）
+   🎵 1.5) uploads / school_materials の mp3/m4a/aac/ogg → WAV 自動変換
+   ========================================================= */
+exports.convertUploadedAudioToWav = onObjectFinalized(
+  {
+    region: "asia-northeast1",
+    timeoutSeconds: 540,
+    memory: "1GiB",
+  },
+  async (event) => {
+    const object = event.data;
+    const filePath = object.name;
+    const contentType = object.contentType || "";
+
+    if (!filePath) return;
+
+    const isTeacherUpload =
+      typeof filePath === "string" && filePath.startsWith("uploads/");
+    const isSchoolMaterialAudio =
+      typeof filePath === "string" && filePath.startsWith("school_materials/");
+
+    if (!isTeacherUpload && !isSchoolMaterialAudio) return;
+
+    // wav / webm はここでは対象外
+    if (/\.wav$/i.test(filePath)) return;
+    if (isWebm(filePath, contentType)) return;
+
+    // mp3 / m4a / aac / ogg のみ変換
+    if (!/\.(mp3|m4a|aac|ogg)$/i.test(filePath)) return;
+
+    const bucket = storage.bucket(object.bucket);
+    const wavPath = filePath.replace(/\.(mp3|m4a|aac|ogg)$/i, ".wav");
+
+    const [wavExists] = await bucket.file(wavPath).exists();
+    if (wavExists) {
+      console.log("⏭ wav already exists:", wavPath);
+      return;
+    }
+
+    const tmpIn = path.join(os.tmpdir(), path.basename(filePath));
+    const tmpOut = path.join(
+      os.tmpdir(),
+      `${path.parse(filePath).name}.wav`
+    );
+
+    try {
+      await bucket.file(filePath).download({ destination: tmpIn });
+      console.log("⬇️ Downloaded source audio:", tmpIn);
+
+      await convertTo16kMonoWav(tmpIn, tmpOut);
+
+      await bucket.upload(tmpOut, {
+        destination: wavPath,
+        metadata: { contentType: "audio/wav" },
+      });
+
+      console.log("✅ converted uploaded audio to wav:", wavPath);
+
+      // TeacherUpload ドキュメントが mp3 を指しているなら wav に切り替える
+      const q = await db
+        .collectionGroup("materials")
+        .where("type", "==", "TeacherUpload")
+        .get();
+
+      const matchedDocs = q.docs.filter((doc) => {
+        const data = doc.data() || {};
+        return data.storagePath === filePath;
+      });
+
+      if (matchedDocs.length > 0) {
+        const batch = db.batch();
+        matchedDocs.forEach((doc) => {
+          batch.set(
+            doc.ref,
+            {
+              originalStoragePath: filePath,
+              storagePath: wavPath,
+              convertedWavPath: wavPath,
+              updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            },
+            { merge: true }
+          );
+        });
+        await batch.commit();
+        console.log("✅ TeacherUpload storagePath switched to wav:", wavPath);
+      } else {
+        console.log("ℹ️ no TeacherUpload material matched for wav switch:", filePath);
+      }
+    } catch (e) {
+      console.error("❌ convertUploadedAudioToWav failed:", e);
+    } finally {
+      try {
+        if (fs.existsSync(tmpIn)) fs.unlinkSync(tmpIn);
+      } catch (_) {}
+      try {
+        if (fs.existsSync(tmpOut)) fs.unlinkSync(tmpOut);
+      } catch (_) {}
+    }
+  }
+);
+
+
+/* =========================================================
+   🧠 2) Whisper 呼び出し
+   ========================================================= */
+async function callWhisperVerboseJson(filePath, { wantWords }) {
+  const file = fs.createReadStream(filePath);
+
+  const form = new FormData();
+  form.append("file", file);
+  form.append("model", "whisper-1");          // ✅ こっちに戻す
+  form.append("language", "en");
+  form.append("response_format", "verbose_json"); // ✅ whisper-1ならOK
+
+  if (wantWords) {
+    form.append("timestamp_granularities[]", "word");
+    form.append("timestamp_granularities[]", "segment");
+  } else {
+    form.append("timestamp_granularities[]", "segment");
+  }
+
+  const res = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}`, ...form.getHeaders() },
+    body: form,
+  });
+
+  if (!res.ok) throw new Error(await res.text());
+  return await res.json();
+}
+
+
+/* =========================================================
+   🪄 3) Whisper → アプリ用 JSON（ルール1：一切補完しない）
    ========================================================= */
 function formatWhisperToAppJson(result) {
   const out = {
     text: result.text || "",
-    segments: [],
     language: result.language || "en",
+    segments: [],
   };
 
   if (!Array.isArray(result.segments)) return out;
 
-  const globalWords = Array.isArray(result.words)
-    ? result.words.map((w) => ({
-        word: (w.word || "").trim(),
-        start: Number(w.start || 0),
-        end: Number(w.end || 0),
-        probability: w.probability ?? 1,
-      }))
-    : [];
-
   out.segments = result.segments.map((seg, idx) => {
-    const start = Number(seg.start || 0);
-    const end = Number(seg.end || 0);
-    const dur = Math.max(0, end - start);
+    const start = Number(seg.start);
+    const end = Number(seg.end);
 
-    let segWords = [];
-
-    if (Array.isArray(seg.words) && seg.words.length > 0) {
-      segWords = seg.words.map((w) => ({
-        word: (w.word || "").trim(),
-        start: Number(w.start || start),
-        end: Number(w.end || start),
-        probability: w.probability ?? 1,
-      }));
-    } else if (globalWords.length > 0) {
-      segWords = globalWords.filter((w) => w.start >= start - 0.05 && w.start < end + 0.05);
-    }
-
-    if (segWords.length === 0) {
-      const tokens = (seg.text || "").split(/\s+/).filter(Boolean);
-
-      const rawDur = dur;
-      let headPad = 0.2;
-      let tailPad = 0.6;
-
-      const maxPad = rawDur * 0.4;
-      let totalPad = headPad + tailPad;
-      if (totalPad > maxPad && totalPad > 0) {
-        const scale = maxPad / totalPad;
-        headPad *= scale;
-        tailPad *= scale;
-      }
-
-      const usableStart = start + headPad;
-      const usableDur = Math.max(0, rawDur - headPad - tailPad);
-      const slice = tokens.length > 0 ? usableDur / Math.max(tokens.length, 1) : 0;
-
-      segWords = tokens.map((t, i) => ({
-        word: t,
-        start: usableStart + i * slice,
-        end: usableStart + (i + 1) * slice,
-        probability: 1,
-      }));
-    }
+    // ✅ Whisperが返した words だけを使う
+    const words = Array.isArray(seg.words)
+      ? seg.words
+          .filter(w => w.start != null && w.end != null)
+          .map(w => ({
+            word: (w.word || "").trim(),
+            start: Number(w.start),
+            end: Number(w.end),
+            probability: w.probability ?? 1,
+          }))
+      : [];
 
     return {
       id: idx,
-      seek: 0,
       start,
       end,
       text: seg.text || "",
-      tokens: seg.tokens || [],
-      temperature: seg.temperature || 0,
-      avg_logprob: seg.avg_logprob || 0,
-      compression_ratio: seg.compression_ratio || 1,
-      no_speech_prob: seg.no_speech_prob || 0,
-      words: segWords,
+      words,          // ← 空配列あり得る（それでOK）
     };
   });
 
   return out;
-}
-
-/* =========================================================
-   🎧 4) Storage: 音声 → _subtitles.json 生成
+}/* =========================================================
+   🎧 4) Storage: 音声 → _subtitles.json 生成（Azure STT版）
+      + ✅ TXTから sentenceSegments を復元（句読点・改行）
+      + ✅ A案：segments を「文単位」に置換して互換維持
+      + ✅ TeacherUpload (uploads/) / school_materials に対応
+      + ✅ 空結果は保存せず error に落とす
    ========================================================= */
 exports.generateSubtitleJson = onObjectFinalized(
-  { region: "asia-northeast1", secrets: [OPENAI_API_KEY] },
+  {
+    region: "asia-northeast1",
+    timeoutSeconds: 540,
+    memory: "1GiB",
+    secrets: [SPEECH_KEY, SPEECH_REGION],
+  },
   async (event) => {
     const object = event.data;
     const filePath = object.name;
@@ -421,6 +715,7 @@ exports.generateSubtitleJson = onObjectFinalized(
     if (!filePath) return;
 
     console.log("🟢 generateSubtitleJson:", filePath);
+    console.log("contentType =", contentType);
 
     // WebMは convertWebmToWav に任せる
     if (isWebm(filePath, contentType)) {
@@ -429,23 +724,193 @@ exports.generateSubtitleJson = onObjectFinalized(
     }
 
     // 音声だけ
-    if (!isAudioFile(filePath)) return;
+    if (!isAudioFile(filePath)) {
+      console.log("⏭ Skip: not audio file", filePath);
+      return;
+    }
+
+    // official / uploads / school_materials の音声を対象にする
+    const isOfficial = isOfficialPath(filePath);
+    const isTeacherUpload =
+      typeof filePath === "string" && filePath.startsWith("uploads/");
+    const isSchoolMaterialAudio =
+      typeof filePath === "string" &&
+      filePath.startsWith("school_materials/") &&
+      filePath.includes("/audio/");
+
+    console.log("isOfficial =", isOfficial);
+    console.log("isTeacherUpload =", isTeacherUpload);
+    console.log("isSchoolMaterialAudio =", isSchoolMaterialAudio);
+
+    if (!isOfficial && !isTeacherUpload && !isSchoolMaterialAudio) {
+      console.log("⏭ Skip: unsupported path", filePath);
+      return;
+    }
+
+    if ((isTeacherUpload || isSchoolMaterialAudio) && !/\.wav$/i.test(filePath)) {
+      console.log("⏭ Skip non-wav teacher audio. waiting for wav conversion:", filePath);
+      return;
+    }
 
     const bucket = storage.bucket(object.bucket);
+    const transcriptPath = buildSubtitleJsonPath(filePath);
+    const waveformPath = buildWaveformJsonPath(filePath);
+
+    console.log("transcriptPath =", transcriptPath);
+    console.log("waveformPath =", waveformPath);
+
+    const [subtitleExists] = await bucket.file(transcriptPath).exists();
+    const [waveformExists] = waveformPath
+      ? await bucket.file(waveformPath).exists()
+      : [true];
+
+    console.log("subtitleExists =", subtitleExists);
+    console.log("waveformExists =", waveformExists);
+
+    if (subtitleExists && waveformExists) {
+      console.log("⏭ subtitles and waveform json exist. skip:", {
+        transcriptPath,
+        waveformPath,
+      });
+      return;
+    }
+
     const tmpIn = path.join(os.tmpdir(), path.basename(filePath));
     await bucket.file(filePath).download({ destination: tmpIn });
+    console.log("⬇️ Downloaded audio:", tmpIn);
 
-    const transcriptPath = filePath.replace(/\.(wav|mp3|m4a|aac|ogg)$/i, "_subtitles.json");
+    let sttInputPath = tmpIn;
+    let tmpWavForStt = null;
+    let tmpJson = null;
 
     try {
-      let res = await callWhisperVerboseJson(tmpIn, { wantWords: true });
-      if (!res.segments?.some((s) => s.words?.length)) {
-        res = await callWhisperVerboseJson(tmpIn, { wantWords: false });
+      // =====================================================
+      // official は今まで通り
+      // uploads / school_materials は必ず STT 用に正規化する
+      // =====================================================
+      const needsStrictNormalization = isTeacherUpload || isSchoolMaterialAudio;
+
+      if (needsStrictNormalization) {
+        tmpWavForStt = path.join(
+          os.tmpdir(),
+          `${path.parse(filePath).name}_for_stt.wav`
+        );
+
+        await convertTo16kMonoWav(tmpIn, tmpWavForStt);
+
+        sttInputPath = tmpWavForStt;
+        console.log("🎧 normalized for teacher STT:", sttInputPath);
+      } else if (!/\.wav$/i.test(filePath)) {
+        // official 側の従来挙動は残す
+        tmpWavForStt = path.join(
+          os.tmpdir(),
+          `${path.parse(filePath).name}_for_stt.wav`
+        );
+
+        await convertTo16kMonoWav(tmpIn, tmpWavForStt);
+
+        sttInputPath = tmpWavForStt;
+        console.log("🎧 converted for official/non-wav STT:", sttInputPath);
+      } else {
+        // official の wav は従来通りそのまま使う
+        sttInputPath = tmpIn;
+        console.log("🎧 using original wav for STT:", sttInputPath);
+      }
+      try {
+        const stat = fs.statSync(sttInputPath);
+        console.log("📦 STT input size(bytes) =", stat.size);
+      } catch (e) {
+        console.log("⚠ failed to stat sttInputPath:", e);
       }
 
-      const formatted = formatWhisperToAppJson(res);
-      const tmpJson = path.join(os.tmpdir(), path.basename(transcriptPath));
+      if (!waveformExists && waveformPath) {
+        try {
+          console.log("🌊 about to save waveform json:", waveformPath);
+          await saveWaveformJsonFromWav({
+            bucket,
+            wavPath: sttInputPath,
+            waveformStoragePath: waveformPath,
+            samplesPerSecond: 100,
+          });
+        } catch (waveformErr) {
+          console.error("⚠ waveform json generation failed:", waveformErr);
+          // 字幕生成は止めない
+        }
+      } else {
+        console.log("⏭ waveform json exists or path is missing. skip waveform generation:", waveformPath);
+      }
+
+      if (subtitleExists) {
+        console.log("⏭ subtitle exists. waveform generation checked. skip Azure STT:", transcriptPath);
+        return;
+      }
+
+      const key = SPEECH_KEY.value();
+      const region = SPEECH_REGION.value();
+      if (!key || !region) throw new Error("SPEECH_KEY / SPEECH_REGION missing");
+
+      // Azure STT。REST short audio は長尺に弱いため、必要なら分割して結合する。
+      const formatted = await transcribeWavToAppJsonWithChunking(sttInputPath, {
+        key,
+        region,
+      });
+      console.log(
+        "🧠 formatted words length =",
+        formatted?.segments?.[0]?.words?.length || 0
+      );
+
+      // =====================================================
+      // official のみ TXT（同名 .txt）から文単位 segments を再構成
+      // uploads / school_materials は txt が無い前提なのでスキップ
+      // =====================================================
+      if (isOfficial) {
+        try {
+          const scriptPath = guessScriptPathFromAudioPath(filePath);
+          const [exists] = await bucket.file(scriptPath).exists();
+
+          if (exists && formatted?.segments?.[0]?.words?.length) {
+            const tmpScript = path.join(os.tmpdir(), path.basename(scriptPath));
+            await bucket.file(scriptPath).download({ destination: tmpScript });
+
+            const scriptText = fs.readFileSync(tmpScript, "utf8");
+            try {
+              fs.unlinkSync(tmpScript);
+            } catch (_) {}
+
+            const words = formatted.segments[0].words;
+
+            const sentenceSegments = buildSentenceSegmentsFromScript({
+              scriptText,
+              words,
+            });
+
+            formatted.words = words;
+
+            formatted.segments = sentenceSegments.map((s) => ({
+              id: s.id,
+              start: s.start,
+              end: s.end,
+              text: s.text,
+              words: words.filter((w) => w.start >= s.start && w.end <= s.end),
+            }));
+
+            formatted.text = (scriptText || "").trim();
+            formatted.sentenceSegments = sentenceSegments;
+
+            console.log("✅ A-mode segments replaced:", formatted.segments.length);
+            console.log("📄 script loaded:", scriptPath);
+          } else {
+            console.log("⚠ script not found OR no words:", scriptPath);
+          }
+        } catch (e) {
+          console.log("⚠ sentence/segments step failed:", e);
+        }
+      }
+
+      // JSON出力
+      tmpJson = path.join(os.tmpdir(), path.basename(transcriptPath));
       fs.writeFileSync(tmpJson, JSON.stringify(formatted, null, 2));
+      console.log("💾 tmp json written:", tmpJson);
 
       await bucket.upload(tmpJson, {
         destination: transcriptPath,
@@ -453,14 +918,454 @@ exports.generateSubtitleJson = onObjectFinalized(
       });
 
       console.log("📄 Uploaded JSON:", transcriptPath);
-      fs.unlinkSync(tmpJson);
+
+      // TeacherUpload / school_materials の場合は Firestore 更新
+      // ここは失敗しても subtitle json 保存自体は成功扱いにする
+    /*  if (isTeacherUpload || isSchoolMaterialAudio) {
+        try {
+          const q = await db
+            .collectionGroup("materials")
+            .where("type", "==", "TeacherUpload")
+            .get();
+
+          console.log("🔍 filePath:", filePath);
+          q.docs.forEach((doc) => {
+            const data = doc.data() || {};
+            console.log("🔍 candidate storagePath:", data.storagePath);
+          });
+
+          const matchedDocs = q.docs.filter((doc) => {
+            const data = doc.data() || {};
+            return data.storagePath === filePath;
+          });
+
+          if (matchedDocs.length > 0) {
+            const batch = db.batch();
+            matchedDocs.forEach((doc) => {
+              batch.set(
+                doc.ref,
+                {
+                  subtitlePath: transcriptPath,
+                  sttStatus: "completed",
+                  sttError: admin.firestore.FieldValue.delete(),
+                  updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+                },
+                { merge: true }
+              );
+            });
+            await batch.commit();
+            console.log("✅ TeacherUpload materials updated:", filePath);
+          } else {
+            console.log("⚠ No TeacherUpload material matched storagePath:", filePath);
+          }
+        } catch (firestoreErr) {
+          console.error("⚠ Firestore update failed after subtitle upload:", firestoreErr);
+        }
+      }
     } catch (e) {
-      console.error("❌ Whisper failed:", e);
+      console.error("❌ generateSubtitleJson failed:", e);
+*/
+      // uploads / school_materials の場合は Firestore を error に更新
+      // いったん切り分けのため停止
+      /*
+      if (isTeacherUpload || isSchoolMaterialAudio) {
+        try {
+          const q = await db
+            .collectionGroup("materials")
+            .where("type", "==", "TeacherUpload")
+            .get();
+
+          const matchedDocs = q.docs.filter((doc) => {
+            const data = doc.data() || {};
+            return data.storagePath === filePath;
+          });
+
+          if (matchedDocs.length > 0) {
+            const batch = db.batch();
+            matchedDocs.forEach((doc) => {
+              batch.set(
+                doc.ref,
+                {
+                  sttStatus: "error",
+                  sttError: String(e?.message || e),
+                  updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+                },
+                { merge: true }
+              );
+            });
+            await batch.commit();
+            console.log("❌ TeacherUpload materials marked as error:", filePath);
+          } else {
+            console.log("⚠ No TeacherUpload material matched storagePath on error:", filePath);
+          }
+        } catch (firestoreErr) {
+          console.error("⚠ Firestore error-status update failed:", firestoreErr);
+        }
+      }
+        */
     } finally {
-      fs.unlinkSync(tmpIn);
+      try {
+        if (tmpJson && fs.existsSync(tmpJson)) fs.unlinkSync(tmpJson);
+      } catch (_) {}
+
+      try {
+        if (tmpIn && fs.existsSync(tmpIn)) fs.unlinkSync(tmpIn);
+      } catch (_) {}
+
+      try {
+        if (tmpWavForStt && fs.existsSync(tmpWavForStt)) fs.unlinkSync(tmpWavForStt);
+      } catch (_) {}
     }
   }
 );
+
+// =========================================================
+// Azure STT
+// =========================================================
+async function azureSpeechToTextWithWords(wavPath, { key, region }) {
+  const audioBuf = fs.readFileSync(wavPath);
+
+  const url =
+    `https://${region}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1` +
+    `?language=en-US&format=detailed&wordLevelTimestamps=true`;
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Ocp-Apim-Subscription-Key": key,
+      "Content-Type": "audio/wav; codecs=audio/pcm; samplerate=16000",
+      "Accept": "application/json",
+    },
+    body: audioBuf,
+  });
+
+  const text = await res.text();
+  console.log("🟦 Azure raw status =", res.status);
+
+  if (!res.ok) {
+    throw new Error(`Azure STT failed: ${res.status} ${text}`);
+  }
+
+  const parsed = JSON.parse(text);
+  const best = parsed?.NBest?.[0] || null;
+  console.log("🟦 Azure raw summary =", {
+    status: parsed?.RecognitionStatus || null,
+    textLen: String(best?.Display || best?.DisplayText || parsed?.DisplayText || "").length,
+    wordsLen: Array.isArray(best?.Words) ? best.Words.length : 0,
+  });
+  return parsed;
+}
+
+const AZURE_STT_CHUNK_SECONDS = 55;
+
+async function splitWavForShortAzureStt(wavPath, chunkSeconds = AZURE_STT_CHUNK_SECONDS) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "azure_stt_chunks_"));
+  const pattern = path.join(dir, "chunk_%03d.wav");
+
+  await new Promise((resolve, reject) => {
+    ffmpeg.setFfmpegPath(ffmpegPath);
+    ffmpeg(wavPath)
+      .outputOptions([
+        "-f segment",
+        `-segment_time ${chunkSeconds}`,
+        "-reset_timestamps 1",
+        "-acodec pcm_s16le",
+        "-ar 16000",
+        "-ac 1",
+      ])
+      .output(pattern)
+      .on("end", resolve)
+      .on("error", reject)
+      .run();
+  });
+
+  const files = fs
+    .readdirSync(dir)
+    .filter((name) => /^chunk_\d+\.wav$/i.test(name))
+    .sort()
+    .map((name, index) => ({
+      path: path.join(dir, name),
+      offsetSec: index * chunkSeconds,
+    }));
+
+  return { dir, files };
+}
+
+function offsetAzureAppJson(formatted, offsetSec, segmentIdStart) {
+  const out = {
+    text: formatted?.text || "",
+    language: formatted?.language || "english",
+    segments: [],
+  };
+  const segments = Array.isArray(formatted?.segments) ? formatted.segments : [];
+  out.segments = segments.map((segment, index) => {
+    const words = Array.isArray(segment.words)
+      ? segment.words.map((word) => ({
+          ...word,
+          start: Number(word.start || 0) + offsetSec,
+          end: Number(word.end || 0) + offsetSec,
+        }))
+      : [];
+    return {
+      ...segment,
+      id: segmentIdStart + index,
+      start: Number(segment.start || 0) + offsetSec,
+      end: Number(segment.end || 0) + offsetSec,
+      words,
+    };
+  });
+  return out;
+}
+
+async function transcribeWavToAppJsonWithChunking(wavPath, { key, region }) {
+  const { dir, files } = await splitWavForShortAzureStt(wavPath);
+  if (!files.length) {
+    throw new Error("Audio chunking failed: no chunks created");
+  }
+
+  console.log("🧩 Azure STT chunks =", files.length);
+  const allSegments = [];
+  const texts = [];
+
+  try {
+    for (let i = 0; i < files.length; i += 1) {
+      const chunk = files[i];
+      const stat = fs.statSync(chunk.path);
+      if (stat.size <= 44) {
+        console.log("⏭ skip empty STT chunk:", i);
+        continue;
+      }
+
+      console.log("🧩 Azure STT chunk start:", {
+        index: i + 1,
+        total: files.length,
+        offsetSec: chunk.offsetSec,
+        bytes: stat.size,
+      });
+      const azureRes = await azureSpeechToTextWithWords(chunk.path, {
+        key,
+        region,
+      });
+      const formatted = formatAzureToAppJson(azureRes);
+      const offset = offsetAzureAppJson(
+        formatted,
+        chunk.offsetSec,
+        allSegments.length
+      );
+      if (offset.text.trim()) texts.push(offset.text.trim());
+      allSegments.push(...offset.segments);
+      console.log("🧩 Azure STT chunk done:", {
+        index: i + 1,
+        textLen: formatted.text.length,
+        wordsLen: formatted.segments?.[0]?.words?.length || 0,
+      });
+    }
+  } finally {
+    try {
+      for (const chunk of files) {
+        if (fs.existsSync(chunk.path)) fs.unlinkSync(chunk.path);
+      }
+      fs.rmdirSync(dir);
+    } catch (e) {
+      console.log("⚠ failed to clean STT chunks:", e);
+    }
+  }
+
+  const text = texts.join(" ").replace(/\s+/g, " ").trim();
+  const wordCount = allSegments.reduce(
+    (sum, segment) => sum + (Array.isArray(segment.words) ? segment.words.length : 0),
+    0
+  );
+  if (!text || wordCount === 0) {
+    throw new Error(`Azure STT returned empty chunked result. textLen=${text.length}, wordsLen=${wordCount}`);
+  }
+
+  return {
+    text,
+    language: "english",
+    segments: allSegments,
+  };
+}
+
+// =========================================================
+// ✅ Azure detailed → app json（まずは “単一segments” を作る）
+// =========================================================
+function formatAzureToAppJson(azure) {
+  const best = azure?.NBest?.[0];
+
+  const display =
+    best?.Display ??
+    best?.DisplayText ??
+    azure?.DisplayText ??
+    "";
+
+  const wordsRaw = Array.isArray(best?.Words) ? best.Words : [];
+
+  const words = wordsRaw
+    .filter((w) => w.Offset != null && w.Duration != null && w.Word)
+    .map((w) => {
+      const start = Number(w.Offset) / 10_000_000;
+      const end = (Number(w.Offset) + Number(w.Duration)) / 10_000_000;
+      return {
+        word: String(w.Word).trim(),
+        start,
+        end,
+        probability: w.Confidence ?? 1,
+      };
+    });
+
+  const segStart = words.length ? words[0].start : 0;
+  const segEnd = words.length ? words[words.length - 1].end : 0;
+
+  return {
+    text: display,
+    language: "english",
+    segments: [
+      {
+        id: 0,
+        start: segStart,
+        end: segEnd,
+        text: display,
+        words,
+      },
+    ],
+  };
+}
+
+// =========================================================
+// ✅ audio と同名のTXTを取る（拡張子だけ .txt）
+// =========================================================
+function guessScriptPathFromAudioPath(filePath) {
+  return filePath.replace(/\.(wav|mp3|m4a|aac|ogg)$/i, ".txt");
+}
+
+// =========================================================
+// ✅ normalize / sentence split / tokenize / build segments
+// =========================================================
+function normalizeToken(s) {
+  return (s || "")
+    .toString()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[\u2019’]/g, "'")
+    .replace(/[\u2010-\u2015]/g, "-")
+    .replace(/[^a-z0-9']/g, "");
+}
+
+function splitIntoSentences(scriptText) {
+  const text = (scriptText || "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\n{2,}/g, "\n\n")
+    .trim();
+  if (!text) return [];
+
+  const paras = text.split(/\n\s*\n/).map((s) => s.trim()).filter(Boolean);
+
+  const out = [];
+  for (const p of paras) {
+    const pp = p.replace(/\n/g, " ").replace(/\s+/g, " ").trim();
+
+    const sentences = pp
+      .split(/(?<=[.!?])\s+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+    if (sentences.length) out.push(...sentences);
+    else out.push(pp);
+  }
+  return out;
+}
+
+function tokenizeSentence(sentence) {
+  const raw = (sentence || "").split(/\s+/).filter(Boolean);
+  const out = [];
+
+  for (const r of raw) {
+    if (/[’']s\b/i.test(r)) {
+      const baseRaw = r.replace(/[’']s\b/i, "");
+      const base = normalizeToken(baseRaw);
+      if (base) out.push(base);
+      out.push("s");
+      continue;
+    }
+
+    const n = normalizeToken(r);
+    if (!n) continue;
+    out.push(n);
+  }
+  return out;
+}
+
+function buildSentenceSegmentsFromScript({ scriptText, words }) {
+  const sentences = splitIntoSentences(scriptText);
+  if (!sentences.length || !Array.isArray(words) || words.length === 0) return [];
+
+  const wordNorm = words.map((w) => normalizeToken(w.word));
+  let wi = 0;
+
+  const segments = [];
+  let sid = 0;
+
+  const SKIP = new Set(["a", "an", "the"]);
+
+  for (const s of sentences) {
+    const stoks0 = tokenizeSentence(s);
+    const stoks = stoks0.filter((t) => !SKIP.has(t));
+    if (stoks.length === 0) continue;
+
+    let startIdx = null;
+    let endIdx = null;
+    let matched = 0;
+
+    const WINDOW = 30;
+
+    for (let si = 0; si < stoks.length; si++) {
+      const target = stoks[si];
+      let found = -1;
+
+      const limit = Math.min(wordNorm.length, wi + WINDOW);
+      for (let k = wi; k < limit; k++) {
+        if (wordNorm[k] === target) {
+          found = k;
+          break;
+        }
+      }
+
+      if (found === -1) continue;
+
+      if (startIdx === null) startIdx = found;
+      endIdx = found;
+      matched++;
+      wi = found + 1;
+    }
+
+    const minMatch = Math.max(2, Math.floor(stoks.length * 0.35));
+    if (startIdx === null || endIdx === null || matched < minMatch) {
+      continue;
+    }
+
+    segments.push({
+      id: sid++,
+      start: words[startIdx].start,
+      end: words[endIdx].end,
+      text: s,
+    });
+  }
+
+  if (segments.length === 0) {
+    return [
+      {
+        id: 0,
+        start: words[0].start,
+        end: words[words.length - 1].end,
+        text: (scriptText || "").trim(),
+      },
+    ];
+  }
+
+  return segments;
+}
 
 /* =========================================================
    🏫 5) Firestore: クラス作成 → 公式教材コピー
@@ -495,40 +1400,288 @@ exports.copyOfficialMaterialsOnClassCreate = onDocumentCreated(
     await batch.commit();
   }
 );
-
 /* =========================================================
-   ☎️ 6) Callable: URL → Whisper 即時解析
+   ☎️ 6) Callable: URL → Azure STT 即時解析（WAV統一版・正規化WAV保存対応）
    ========================================================= */
-exports.transcribeFromUrl = onCall(
-  { region: "asia-northeast1", secrets: [OPENAI_API_KEY] },
+exports.transcribeFromUrlV2 = onCall(
+  {
+    region: "asia-northeast1",
+    secrets: [SPEECH_KEY, SPEECH_REGION],
+    timeoutSeconds: 540,
+    memory: "1GiB",
+  },
   async (req) => {
-    const audioUrl = req.data.audioUrl || req.data.sourceUrl;
-    if (!audioUrl) throw new Error("audioUrl required");
+    let tmpIn = null;
+    let tmpWav = null;
 
-    const audioResp = await fetch(audioUrl);
-    if (!audioResp.ok) throw new Error(`Failed to fetch audio: ${audioResp.status} ${audioResp.statusText}`);
-    const buf = Buffer.from(await audioResp.arrayBuffer());
+    try {
+      const audioUrl = req.data.audioUrl || req.data.sourceUrl;
+      const subtitleStoragePath = req.data.subtitleStoragePath || null;
+      const normalizedAudioStoragePath =
+        req.data.normalizedAudioStoragePath || null;
+      const waveformStoragePath = req.data.waveformStoragePath || null;
 
-    const form = new FormData();
-    form.append("file", buf, { filename: "audio.wav", contentType: "audio/wav" });
-    form.append("model", "whisper-1");
-    form.append("response_format", "verbose_json");
-    form.append("timestamp_granularities[]", "word");
-    form.append("timestamp_granularities[]", "segment");
+      console.log("🟦 transcribeFromUrlV2 called");
+      console.log("audioUrl =", audioUrl);
+      console.log("subtitleStoragePath =", subtitleStoragePath);
+      console.log("normalizedAudioStoragePath =", normalizedAudioStoragePath);
+      console.log("waveformStoragePath =", waveformStoragePath);
 
-    const res = await fetch("https://api.openai.com/v1/audio/transcriptions", {
-      method: "POST",
-      headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}`, ...form.getHeaders() },
-      body: form,
-    });
+      if (!audioUrl) throw new Error("audioUrl required");
 
-    const text = await res.text();
-    if (!res.ok) throw new Error(text);
+      const bucket = storage.bucket();
 
-    return JSON.parse(text);
+      // =====================================================
+      // ① 既存JSON確認
+      // - subtitleだけ既にある場合でも、waveformが無ければ音声を取得してwaveformだけ生成する
+      // - 両方ある場合だけ即returnする
+      // =====================================================
+      let subtitleExists = false;
+      let existingSubtitle = null;
+      let waveformExists = waveformStoragePath ? false : true;
+
+      if (subtitleStoragePath) {
+        [subtitleExists] = await bucket.file(subtitleStoragePath).exists();
+        if (subtitleExists) {
+          console.log("⏭ subtitle already exists:", subtitleStoragePath);
+          const [existingBuf] = await bucket.file(subtitleStoragePath).download();
+          existingSubtitle = JSON.parse(existingBuf.toString("utf-8"));
+        }
+      }
+
+      if (waveformStoragePath) {
+        [waveformExists] = await bucket.file(waveformStoragePath).exists();
+        console.log("waveformExists =", waveformExists);
+      }
+
+      if (subtitleExists && waveformExists) {
+        console.log("⏭ subtitle and waveform already exist. skip Azure STT:", {
+          subtitleStoragePath,
+          waveformStoragePath,
+        });
+
+        return {
+          success: true,
+          skipped: true,
+          reason: "subtitle_and_waveform_already_exist",
+          normalizedAudioStoragePath,
+          subtitleStoragePath,
+          waveformStoragePath,
+          subtitle: existingSubtitle,
+        };
+      }
+
+      const audioResp = await fetch(audioUrl);
+      console.log("audio fetch status =", audioResp.status, audioResp.statusText);
+
+      if (!audioResp.ok) {
+        throw new Error(
+          `Failed to fetch audio: ${audioResp.status} ${audioResp.statusText}`
+        );
+      }
+
+      const respContentType = audioResp.headers.get("content-type") || "";
+      console.log("audio response content-type =", respContentType);
+
+      const ab = await audioResp.arrayBuffer();
+      console.log("arrayBuffer byteLength =", ab.byteLength);
+
+      const buf = Buffer.from(ab);
+      console.log("audio bytes =", buf.length);
+
+      tmpIn = path.join(os.tmpdir(), `input_${Date.now()}.wav`);
+      fs.writeFileSync(tmpIn, buf);
+      console.log("💾 tmp input written:", tmpIn);
+      console.log("tmpIn exists =", fs.existsSync(tmpIn));
+
+      tmpWav = path.join(os.tmpdir(), `stt_${Date.now()}.wav`);
+      console.log("🎛️ about to normalize wav");
+      await convertTo16kMonoWav(tmpIn, tmpWav);
+      console.log("✅ wav normalized");
+      console.log("tmpWav exists =", fs.existsSync(tmpWav));
+
+      const sttInputPath = tmpWav;
+      console.log("🎧 normalized for STT:", sttInputPath);
+
+      if (waveformStoragePath && !waveformExists) {
+        console.log("🌊 about to save waveform json");
+        await saveWaveformJsonFromWav({
+          bucket,
+          wavPath: sttInputPath,
+          waveformStoragePath,
+          samplesPerSecond: 100,
+        });
+      } else {
+        console.log("⏭ waveform json exists or path is missing. skip waveform generation:", waveformStoragePath);
+      }
+
+      if (subtitleExists) {
+        console.log("⏭ subtitle exists. waveform generation checked. skip Azure STT:", subtitleStoragePath);
+        return {
+          success: true,
+          skipped: true,
+          reason: "subtitle_exists_waveform_checked",
+          normalizedAudioStoragePath,
+          subtitleStoragePath,
+          waveformStoragePath,
+          subtitle: existingSubtitle,
+        };
+      }
+
+      // =====================================================
+      // ② normalized wav も既にあるなら再アップしない
+      // =====================================================
+      if (normalizedAudioStoragePath) {
+        const [normalizedExists] = await bucket
+          .file(normalizedAudioStoragePath)
+          .exists();
+
+        if (normalizedExists) {
+          console.log(
+            "⏭ normalized wav already exists. skip upload:",
+            normalizedAudioStoragePath
+          );
+        } else {
+          console.log("☁️ about to upload normalized wav");
+          await bucket.upload(sttInputPath, {
+            destination: normalizedAudioStoragePath,
+            metadata: {
+              contentType: "audio/wav",
+              cacheControl: "no-cache",
+            },
+          });
+          console.log("✅ normalized wav saved:", normalizedAudioStoragePath);
+        }
+      }
+
+      const key = SPEECH_KEY.value();
+      const region = SPEECH_REGION.value();
+      if (!key || !region) {
+        throw new Error("SPEECH_KEY / SPEECH_REGION missing");
+      }
+
+      console.log("🧠 about to call Azure STT");
+      const formatted = await transcribeWavToAppJsonWithChunking(sttInputPath, {
+        key,
+        region,
+      });
+      console.log("🟦 Azure STT response received");
+      console.log("parsed.text length =", formatted?.text?.length || 0);
+      console.log("parsed.segments length =", formatted?.segments?.length || 0);
+      console.log(
+        "first segment =",
+        JSON.stringify(formatted?.segments?.[0] || null)
+      );
+
+      if (subtitleStoragePath) {
+        console.log("☁️ about to save subtitle json");
+        await bucket.file(subtitleStoragePath).save(
+          JSON.stringify(formatted, null, 2),
+          {
+            metadata: {
+              contentType: "application/json; charset=utf-8",
+              cacheControl: "no-cache",
+            },
+          }
+        );
+        console.log("✅ subtitle json saved:", subtitleStoragePath);
+      }
+
+      return {
+        success: true,
+        skipped: false,
+        normalizedAudioStoragePath,
+        subtitleStoragePath,
+        waveformStoragePath,
+        subtitle: formatted,
+      };
+    } catch (e) {
+      console.error("🚨 transcribeFromUrlV2 failed:", e);
+      throw new Error(e.message || String(e));
+    } finally {
+      try {
+        if (tmpIn && fs.existsSync(tmpIn)) fs.unlinkSync(tmpIn);
+      } catch (_) {}
+      try {
+        if (tmpWav && fs.existsSync(tmpWav)) fs.unlinkSync(tmpWav);
+      } catch (_) {}
+    }
   }
 );
 
+/* =========================================================
+   ☎️ 生徒AI採点用: URL → OpenAI Whisper STT
+   - Azure Speech ではなく OpenAI whisper-1 を使用
+   - 生徒録音の文字起こし専用
+   ========================================================= */
+exports.transcribeStudentRecording = onCall(
+  {
+    region: "asia-northeast1",
+    secrets: [OPENAI_API_KEY],
+    timeoutSeconds: 540,
+    memory: "1GiB",
+  },
+  async (req) => {
+    let tmpIn = null;
+
+    try {
+      const audioUrl = req.data.audioUrl || req.data.sourceUrl;
+
+      console.log("🟢 transcribeStudentRecording called");
+      console.log("audioUrl =", audioUrl);
+
+      if (!audioUrl) {
+        throw new Error("audioUrl required");
+      }
+
+      const audioResp = await fetch(audioUrl);
+      console.log("audio fetch status =", audioResp.status, audioResp.statusText);
+
+      if (!audioResp.ok) {
+        throw new Error(
+          `Failed to fetch audio: ${audioResp.status} ${audioResp.statusText}`
+        );
+      }
+
+      const ab = await audioResp.arrayBuffer();
+      const buf = Buffer.from(ab);
+
+      tmpIn = path.join(os.tmpdir(), `student_recording_${Date.now()}.wav`);
+      fs.writeFileSync(tmpIn, buf);
+
+      console.log("💾 student tmp audio written:", tmpIn);
+      console.log("audio bytes =", buf.length);
+
+      const whisperResult = await callWhisperVerboseJson(tmpIn, {
+        wantWords: false,
+      });
+
+      console.log("📝 OpenAI Whisper result =", JSON.stringify(whisperResult));
+
+      const text = (whisperResult.text || "").trim();
+
+      return {
+        success: true,
+        provider: "openai_whisper",
+        text,
+        subtitle: {
+          text,
+          language: whisperResult.language || "en",
+          segments: Array.isArray(whisperResult.segments)
+            ? whisperResult.segments
+            : [],
+        },
+      };
+    } catch (e) {
+      console.error("🚨 transcribeStudentRecording failed:", e);
+      throw new Error(e.message || String(e));
+    } finally {
+      try {
+        if (tmpIn && fs.existsSync(tmpIn)) fs.unlinkSync(tmpIn);
+      } catch (_) {}
+    }
+  }
+);
 /* =========================================================
    📚 7) Storage: _subtitles.json → Firestore(official_materials) 自動登録
    ========================================================= */
@@ -612,8 +1765,57 @@ exports.registerOfficialMaterialOnSubtitleCreated = onObjectFinalized(
 
 
 /* =========================================================
-   🔊 8) Azure TTS (SSML) -> WAV buffer
+   🔊 8) Azure TTS (SSML) -> WAV buffer  ✅ token cache + 429 retry
    ========================================================= */
+
+// インスタンス内キャッシュ（Cloud Functionsは同一インスタンス内で再利用される）
+let _azureTokenCache = { token: null, expiresAt: 0 };
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+// "retry after 31 seconds" みたいな文字列が body に入ってても拾えるようにする（保険）
+function parseRetryAfterSecondsFromText(t) {
+  const m = String(t || "").match(/retry after\s+(\d+)\s+seconds/i);
+  return m ? Number(m[1]) : null;
+}
+
+async function getAzureToken({ key, region }) {
+  const now = Date.now();
+  if (_azureTokenCache.token && now < _azureTokenCache.expiresAt) {
+    return _azureTokenCache.token;
+  }
+
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const tokenRes = await fetch(
+      `https://${region}.api.cognitive.microsoft.com/sts/v1.0/issuetoken`,
+      { method: "POST", headers: { "Ocp-Apim-Subscription-Key": key } }
+    );
+
+    if (tokenRes.ok) {
+      const token = await tokenRes.text();
+      // トークンTTLは短めなので、保守的に 9分だけキャッシュ
+      _azureTokenCache = { token, expiresAt: Date.now() + 9 * 60 * 1000 };
+      return token;
+    }
+
+    const body = await tokenRes.text();
+
+    if (tokenRes.status === 429) {
+      const retrySec = parseRetryAfterSecondsFromText(body);
+      const waitSec = retrySec ?? (31 + attempt * 5);
+      console.log(`⏳ Azure token 429. wait ${waitSec}s then retry...`);
+      await sleep(waitSec * 1000);
+      continue;
+    }
+
+    throw new Error(`Azure token failed: ${tokenRes.status} ${body}`);
+  }
+
+  throw new Error("Azure token failed: too many retries");
+}
+
 async function azureTtsToWavBuffer({ text, voiceName, rate }, { key, region }) {
   const ssml = `
 <speak version="1.0" xml:lang="en-US">
@@ -624,35 +1826,56 @@ async function azureTtsToWavBuffer({ text, voiceName, rate }, { key, region }) {
   </voice>
 </speak>`.trim();
 
-  // token
-  const tokenRes = await fetch(`https://${region}.api.cognitive.microsoft.com/sts/v1.0/issuetoken`, {
-    method: "POST",
-    headers: { "Ocp-Apim-Subscription-Key": key },
-  });
-  if (!tokenRes.ok) {
-    const t = await tokenRes.text();
-    throw new Error(`Azure token failed: ${tokenRes.status} ${t}`);
-  }
-  const token = await tokenRes.text();
+  const token = await getAzureToken({ key, region });
 
-  const ttsRes = await fetch(`https://${region}.tts.speech.microsoft.com/cognitiveservices/v1`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/ssml+xml",
-      "X-Microsoft-OutputFormat": "riff-16khz-16bit-mono-pcm",
-      "User-Agent": "shadow-speak-functions",
-    },
-    body: ssml,
-  });
+  const ttsRes = await fetch(
+    `https://${region}.tts.speech.microsoft.com/cognitiveservices/v1`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/ssml+xml",
+        "X-Microsoft-OutputFormat": "riff-16khz-16bit-mono-pcm",
+        "User-Agent": "shadow-speak-functions",
+      },
+      body: ssml,
+    }
+  );
 
   if (!ttsRes.ok) {
     const t = await ttsRes.text();
+
+    // tokenが切れてた/無効になってた場合は1回だけ取り直して再試行（保険）
+    if (ttsRes.status === 401 || ttsRes.status === 403) {
+      _azureTokenCache = { token: null, expiresAt: 0 };
+      const token2 = await getAzureToken({ key, region });
+
+      const ttsRes2 = await fetch(
+        `https://${region}.tts.speech.microsoft.com/cognitiveservices/v1`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${token2}`,
+            "Content-Type": "application/ssml+xml",
+            "X-Microsoft-OutputFormat": "riff-16khz-16bit-mono-pcm",
+            "User-Agent": "shadow-speak-functions",
+          },
+          body: ssml,
+        }
+      );
+
+      if (!ttsRes2.ok) {
+        const t2 = await ttsRes2.text();
+        throw new Error(`Azure TTS failed(after refresh): ${ttsRes2.status} ${t2}`);
+      }
+
+      return Buffer.from(await ttsRes2.arrayBuffer());
+    }
+
     throw new Error(`Azure TTS failed: ${ttsRes.status} ${t}`);
   }
 
-  const arrayBuf = await ttsRes.arrayBuffer();
-  return Buffer.from(arrayBuf);
+  return Buffer.from(await ttsRes.arrayBuffer());
 }
 
 function escapeXml(s) {
@@ -663,6 +1886,7 @@ function escapeXml(s) {
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&apos;");
 }
+
 /* =========================================================
    ✅ 9) Storage: official/*.txt → WAV 自動生成（Level/Patternで声&速度）
    ========================================================= */
@@ -885,7 +2109,8 @@ exports.generateDictationForLessonPattern = onObjectFinalized(
 
     if (!isOfficialPath(filePath)) return;
     if (!isSubtitlesJson(filePath)) return;
-
+    const passage = extractPassageNumber(filePath);
+    if (passage !== null && passage !== 1) return;
     if (filePath.includes("/evaluation/")) return;
     if (filePath.includes("/dictation_audio/")) return;
 
@@ -1056,9 +2281,13 @@ function buildQuestionText(group, q) {
 
   return "";
 }
-
 exports.generateDictationAudioFromDictationJson = onObjectFinalized(
-  { region: "asia-northeast1", timeoutSeconds: 540, memory: "1GiB", secrets: [SPEECH_KEY, SPEECH_REGION] },
+  {
+    region: "asia-northeast1",
+    timeoutSeconds: 540,
+    memory: "1GiB",
+    secrets: [SPEECH_KEY, SPEECH_REGION],
+  },
   async (event) => {
     const object = event.data;
     const filePath = object.name;
@@ -1067,25 +2296,34 @@ exports.generateDictationAudioFromDictationJson = onObjectFinalized(
 
     const bucket = storage.bucket(object.bucket);
 
+    // ============================
+    // 1) dictation.json 読み込み
+    // ============================
     const [buf] = await bucket.file(filePath).download();
     const dict = JSON.parse(buf.toString("utf-8"));
-
     const parts = dict.parts || {};
-    const baseDir = filePath.replace(/\/dictation\.json$/i, ""); // official/Level5/Lesson3/D
+
+    const baseDir = filePath.replace(/\/dictation\.json$/i, "");
+    const audioBase = `${baseDir}/dictation_audio/`;
+
+    const { level, lesson, pattern } = extractMetaFromOfficialPath(filePath);
 
     const key = process.env.SPEECH_KEY;
     const region = process.env.SPEECH_REGION;
-    const voiceName = "en-US-JennyNeural";
-    const rate = "0.85";
+    const voiceName = pickVoiceName({ pattern });
+    const rate = pickRate({ level });
 
+    console.log("🎙 dictation TTS:", { filePath, level, lesson, pattern, voiceName, rate });
+
+    // ============================
+    // 2) 生成ジョブ作成
+    // ============================
     const jobs = [];
     for (const group of ["A", "B", "C"]) {
       const qs = Array.isArray(parts[group]) ? parts[group] : [];
       for (const q of qs) {
-        const id = q.id;
-        if (!id) continue;
-        const outPath = `${baseDir}/dictation_audio/${group}/${id}.wav`;
-        jobs.push({ group, id, outPath, q });
+        if (!q?.id) continue;
+        jobs.push({ group, id: q.id, q });
       }
     }
 
@@ -1094,69 +2332,99 @@ exports.generateDictationAudioFromDictationJson = onObjectFinalized(
       return;
     }
 
-    // 既存チェック（全部あるなら終了）
-    let allExist = true;
-    for (const j of jobs) {
-      const [ex] = await bucket.file(j.outPath).exists();
-      if (!ex) { allExist = false; break; }
+// ============================
+// 3) ✅ tmp に生成（全部成功したら置き換える）
+// ============================
+const runId = `${Date.now()}_${Math.random().toString(16).slice(2)}`;
+const tmpBase = `${baseDir}/dictation_audio_tmp/${runId}/`;
+
+const failed = [];
+
+for (let i = 0; i < jobs.length; i++) {
+  const j = jobs[i];
+  const tmpOutPath = `${tmpBase}${j.group}/${j.id}.wav`;
+
+  try {
+    const text = buildQuestionText(j.group, j.q);
+    if (!text) {
+      failed.push({ id: j.id, reason: "empty text" });
+      continue;
     }
-    if (allExist) {
-      console.log("⏭ all dictation audio exists. skip.");
+
+    // ✅ 429対策：2回目以降、TTSの前に待つ（間隔が保証される）
+    if (i > 0) {
+      await sleep(300); // まずは300ms。まだ429出るなら 500〜1000へ
+      // await sleep(250 + Math.floor(Math.random() * 200)); // 乱数版でもOK
+    }
+
+    const wavBuf = await azureTtsToWavBuffer(
+      { text, voiceName, rate },
+      { key, region }
+    );
+
+    await bucket.file(tmpOutPath).save(wavBuf, {
+      contentType: "audio/wav",
+      resumable: false,
+      metadata: { cacheControl: "no-cache" },
+    });
+
+    console.log("✅ tmp dictation wav uploaded:", tmpOutPath);
+  } catch (e) {
+    console.error("❌ tmp dictation audio failed:", tmpOutPath, e);
+    failed.push({ id: j.id, reason: String(e?.message || e) });
+  }
+}
+
+
+    // ============================
+    // 4) 失敗があれば：既存は触らず tmp を掃除して終了
+    // ============================
+    if (failed.length > 0) {
+      console.log("🛑 dictation generation failed. keep existing audio. failed=", failed);
+
+      // tmp掃除
+      const [tmpFiles] = await bucket.getFiles({ prefix: tmpBase });
+      await Promise.all(tmpFiles.map(f => f.delete().catch(() => null)));
+      console.log("🧹 cleaned tmp:", tmpBase);
+
       return;
     }
 
-    // 生成
-    for (const j of jobs) {
-      const [ex] = await bucket.file(j.outPath).exists();
-      if (ex) continue;
+// ============================
+// 5) ✅ 全部成功：tmp → 本番へコピー（先に上書き）→ 不要な旧ファイルだけ削除 → tmp掃除
+// ============================
 
-      try {
-        const text = buildQuestionText(j.group, j.q);
-        if (!text) continue;
+// (1) tmp → 本番コピー（先に全部コピーして上書き）
+for (const j of jobs) {
+  const src = `${tmpBase}${j.group}/${j.id}.wav`;
+  const dst = `${audioBase}${j.group}/${j.id}.wav`;
+  await bucket.file(src).copy(bucket.file(dst));
+  console.log("📦 copied:", src, "->", dst);
+}
 
-        const wavBuf = await azureTtsToWavBuffer(
-          { text, voiceName, rate },
-          { key, region }
-        );
-
-        await bucket.file(j.outPath).save(wavBuf, {
-          contentType: "audio/wav",
-          resumable: false,
-          metadata: { cacheControl: "no-cache" },
-        });
-
-        console.log("✅ dictation wav uploaded:", j.outPath);
-      } catch (e) {
-        console.error("❌ dictation audio failed:", j.outPath, e);
+// (2) 任意：今回生成しなかった「古い wav」だけ削除（IDが減った時の掃除）
+const keep = new Set(jobs.map(j => `${audioBase}${j.group}/${j.id}.wav`));
+for (const group of ["A", "B", "C"]) {
+  const [oldFiles] = await bucket.getFiles({ prefix: `${audioBase}${group}/` });
+  await Promise.all(
+    oldFiles.map(async (f) => {
+      if (!keep.has(f.name)) {
+        await f.delete().catch(() => null);
+        console.log("🗑 removed stale:", f.name);
       }
-    }
+    })
+  );
+}
+
+// (3) tmp 削除
+const [tmpFiles2] = await bucket.getFiles({ prefix: tmpBase });
+await Promise.all(tmpFiles2.map(f => f.delete().catch(() => null)));
+console.log("🧹 cleaned tmp:", tmpBase);
+
+console.log("✅ dictation_audio replace complete:", audioBase);
+
   }
 );
-function toJaSubtitlesPath(p) {
-  if (typeof p !== "string") return null;
-
-  const lower = p.toLowerCase();
-
-  // ✅ 変な旧ルールが来たら正規化して返す
-  if (lower.endsWith("_subtitles_ja.json")) {
-    return p.replace(/_subtitles_ja\.json$/i, "_ja.json");
-  }
-
-  // ✅ すでに正しい ja なら何もしない
-  if (lower.endsWith("_ja.json")) return null;
-
-  // ✅ 英語字幕（Whisper生成）: xxx_subtitles.json → xxx_ja.json
-  if (lower.endsWith("_subtitles.json")) {
-    return p.replace(/_subtitles\.json$/i, "_ja.json");
-  }
-
-  // 念のため
-  if (lower.endsWith(".json")) {
-    return p.replace(/\.json$/i, "_ja.json");
-  }
-
-  return null;
-}
 
 
 exports.generateJaSubtitleJson = onObjectFinalized(
@@ -1166,8 +2434,16 @@ exports.generateJaSubtitleJson = onObjectFinalized(
     const filePath = object.name;
     if (!filePath) return;
 
-    // ✅ 対象は「Whisperで作った字幕JSON」だけ
-    if (!isSubtitlesJson(filePath)) return;
+// ✅ 自分が作った ja を再トリガーしない（無限ループ防止）
+if (/_ja(_subtitles)?\.json$/i.test(filePath)) return;
+
+// ✅ 字幕JSONだけ（それ以外は触らない）
+if (!isSubtitlesJson(filePath)) return;
+
+
+
+
+
 
     // ✅ evaluationは要件次第：作りたいなら外さない。作りたくないなら return;
     // if (filePath.includes("/evaluation/")) return;
@@ -1255,3 +2531,257 @@ async function translateSegmentsToJa(src, apiKey) {
     })),
   };
 }
+try {
+  exports.createReviewAccount =
+    require("./create_review_account").createReviewAccount;
+} catch (error) {
+  if (error && error.code !== "MODULE_NOT_FOUND") throw error;
+  console.warn("⚠ createReviewAccount module not found. export skipped.");
+}
+
+async function assertStudentDataAdmin(request, schoolId, teacherId) {
+  const uid = request.auth && request.auth.uid;
+  if (!uid) {
+    throw new HttpsError("unauthenticated", "ログインが必要です。");
+  }
+
+  const superAdminSnap = await db.collection("admins").doc(uid).get();
+  const superAdminData = superAdminSnap.data() || {};
+  const isSuperAdmin =
+    superAdminSnap.exists &&
+    superAdminData.active === true &&
+    superAdminData.role === "superAdmin";
+  if (isSuperAdmin) return { uid, role: "superAdmin" };
+
+  if (!teacherId) {
+    throw new HttpsError("permission-denied", "管理者権限を確認できません。");
+  }
+
+  const teacherSnap = await db
+    .collection("schools")
+    .doc(schoolId)
+    .collection("teachers")
+    .doc(teacherId)
+    .get();
+  const teacherData = teacherSnap.data() || {};
+  const isSchoolAdmin =
+    teacherSnap.exists &&
+    teacherData.active !== false &&
+    (teacherData.isAdmin === true ||
+      teacherData.schoolAdmin === true ||
+      teacherData.role === "schoolAdmin");
+  const linkedUid =
+    teacherData.authUid ||
+    teacherData.firebaseUid ||
+    teacherData.uid ||
+    null;
+
+  if (!isSchoolAdmin || linkedUid !== uid) {
+    throw new HttpsError(
+      "permission-denied",
+      "完全削除はFirebase Authに紐づいた学校管理者のみ実行できます。"
+    );
+  }
+
+  return { uid, role: "schoolAdmin", teacherId };
+}
+
+async function deleteIfExists(ref) {
+  const snap = await ref.get();
+  if (!snap.exists) return false;
+  await db.recursiveDelete(ref);
+  return true;
+}
+
+exports.hardDeleteStudentData = onCall(async (request) => {
+  const schoolId = String(request.data.schoolId || "").trim();
+  const teacherId = String(request.data.teacherId || "").trim();
+  const studentDocId = String(request.data.studentDocId || "").trim();
+  const internalUid = String(request.data.internalUid || "").trim() || studentDocId;
+  const loginId = String(request.data.loginId || "").trim();
+  const confirmLoginId = String(request.data.confirmLoginId || "").trim();
+  const confirmText = String(request.data.confirmText || "").trim();
+
+  if (!schoolId || !studentDocId || !internalUid || !loginId) {
+    throw new HttpsError("invalid-argument", "必要な生徒情報が不足しています。");
+  }
+  if (loginId !== confirmLoginId || confirmText !== "完全削除する") {
+    throw new HttpsError("invalid-argument", "確認情報が一致しません。");
+  }
+  if (!/^[a-zA-Z0-9_-]+$/.test(schoolId)) {
+    throw new HttpsError("invalid-argument", "schoolIdの形式が不正です。");
+  }
+
+  const actor = await assertStudentDataAdmin(request, schoolId, teacherId);
+
+  const schoolRef = db.collection("schools").doc(schoolId);
+  const studentRef = schoolRef.collection("students").doc(internalUid);
+  const studentSnap = await studentRef.get();
+  if (!studentSnap.exists) {
+    throw new HttpsError("not-found", "対象生徒が存在しません。");
+  }
+
+  const studentData = studentSnap.data() || {};
+  const storedLoginId = String(studentData.loginId || "").trim();
+  const status = String(studentData.status || "").trim();
+  const enrollmentStatus = String(studentData.enrollmentStatus || "").trim();
+  const isEnded =
+    enrollmentStatus === "ended" ||
+    status === "enrollmentEnded" ||
+    status === "graduated" ||
+    status === "withdrawn" ||
+    status === "transferred" ||
+    status === "left";
+
+  if (storedLoginId !== loginId) {
+    throw new HttpsError("failed-precondition", "ログインIDが現在の生徒データと一致しません。");
+  }
+  if (!isEnded) {
+    throw new HttpsError("failed-precondition", "先に在籍終了にしてください。");
+  }
+
+  const deletedPaths = [];
+
+  await db.collection("admin_delete_logs").add({
+    action: "hardDeleteStudentData",
+    schoolId,
+    studentDocId,
+    internalUid,
+    loginId,
+    studentName: studentData.name || null,
+    requestedBy: actor.uid,
+    requestedRole: actor.role,
+    teacherId: actor.teacherId || null,
+    requestedAt: admin.firestore.FieldValue.serverTimestamp(),
+  });
+
+  const classesSnap = await schoolRef.collection("classes").get();
+  for (const classDoc of classesSnap.docs) {
+    for (const id of new Set([studentDocId, internalUid, loginId])) {
+      const classStudentRef = classDoc.ref.collection("students").doc(id);
+      if (await deleteIfExists(classStudentRef)) {
+        deletedPaths.push(classStudentRef.path);
+      }
+    }
+
+    const materialsSnap = await classDoc.ref.collection("materials").get();
+    for (const materialDoc of materialsSnap.docs) {
+      for (const id of new Set([studentDocId, internalUid, loginId])) {
+        const resultRef = materialDoc.ref.collection("results").doc(id);
+        if (await deleteIfExists(resultRef)) {
+          deletedPaths.push(resultRef.path);
+        }
+      }
+    }
+  }
+
+  if (await deleteIfExists(studentRef)) {
+    deletedPaths.push(studentRef.path);
+  }
+
+  const authUid = String(studentData.uid || studentData.authUid || "").trim();
+  if (authUid) {
+    const userRef = db.collection("users").doc(authUid);
+    if (await deleteIfExists(userRef)) {
+      deletedPaths.push(userRef.path);
+    }
+    await admin.auth().deleteUser(authUid).catch((error) => {
+      if (error && error.code !== "auth/user-not-found") throw error;
+    });
+    deletedPaths.push(`auth/${authUid}`);
+  }
+
+  const bucket = storage.bucket();
+  const storagePrefixes = [
+    `users/${authUid}/`,
+    `recordings/${authUid}/`,
+    `test/temp_recordings/${authUid}/`,
+    `schools/${schoolId}/students/${internalUid}/`,
+    `school_materials/${schoolId}/students/${internalUid}/`,
+  ].filter((prefix) => !prefix.includes("//"));
+
+  for (const prefix of storagePrefixes) {
+    const [files] = await bucket.getFiles({ prefix });
+    for (const file of files) {
+      await file.delete({ ignoreNotFound: true });
+      deletedPaths.push(`storage/${file.name}`);
+    }
+  }
+
+  return {
+    ok: true,
+    deletedCount: deletedPaths.length,
+    deletedPaths,
+  };
+});
+
+  exports.hardDeleteSchool = onCall(async (request) => {
+  const uid = request.auth && request.auth.uid;
+  if (!uid) {
+    throw new HttpsError("unauthenticated", "ログインが必要です。");
+  }
+
+  const adminSnap = await db.collection("admins").doc(uid).get();
+  const adminData = adminSnap.data();
+
+  const isSuperAdmin =
+    adminSnap.exists &&
+    adminData &&
+    adminData.active === true &&
+    adminData.role === "superAdmin";
+
+  if (!isSuperAdmin) {
+    throw new HttpsError(
+      "permission-denied",
+      "完全削除はsuperAdminのみ実行できます。"
+    );
+  }
+
+  const schoolId = String(request.data.schoolId || "").trim();
+  const confirmSchoolId = String(request.data.confirmSchoolId || "").trim();
+  const confirmText = String(request.data.confirmText || "").trim();
+
+  if (!schoolId || schoolId !== confirmSchoolId || confirmText !== "完全削除") {
+    throw new HttpsError("invalid-argument", "確認情報が一致しません。");
+  }
+
+  if (!/^[a-zA-Z0-9_-]+$/.test(schoolId)) {
+    throw new HttpsError("invalid-argument", "schoolIdの形式が不正です。");
+  }
+
+  const schoolRef = db.collection("schools").doc(schoolId);
+  const schoolSnap = await schoolRef.get();
+
+  if (!schoolSnap.exists) {
+    throw new HttpsError("not-found", "学校が存在しません。");
+  }
+
+  const schoolData = schoolSnap.data() || {};
+  const isSoftDeleted =
+    schoolData.deletedAt != null ||
+    schoolData.status === "deleted" ||
+    schoolData.contractStatus === "deleted";
+
+  if (!isSoftDeleted) {
+    throw new HttpsError(
+      "failed-precondition",
+      "先にAdmin画面で削除扱いにしてください。"
+    );
+  }
+
+  await db.collection("admin_delete_logs").add({
+    action: "hardDeleteSchool",
+    schoolId,
+    schoolName: schoolData.schoolName || null,
+    requestedBy: uid,
+    requestedAt: admin.firestore.FieldValue.serverTimestamp(),
+  });
+
+  await db.recursiveDelete(schoolRef);
+
+  return {
+    ok: true,
+    deletedPath: `schools/${schoolId}`,
+  };
+});
+Object.assign(exports, require("./hard_delete_school_http"));
