@@ -145,7 +145,7 @@ function baseDb({ writingEnabled } = {}) {
 }
 
 (async () => {
-  await test("missing writing feature is fail-closed", async () => {
+  await test("missing legacy writing flag still allows the standard feature", async () => {
     const db = baseDb();
     await registerWritingStudentSession({
       db,
@@ -159,14 +159,14 @@ function baseDb({ writingEnabled } = {}) {
       },
     });
     const status = await getWritingFeatureStatus({ db, authUid: "authA" });
-    assert.strictEqual(status.enabled, false);
-    await assert.rejects(
-      () => assertWritingEnabledForAuth({ db, authUid: "authA" }),
-      WritingAccessError
+    assert.strictEqual(status.enabled, true);
+    assert.strictEqual(
+      (await assertWritingEnabledForAuth({ db, authUid: "authA" })).enabled,
+      true
     );
   });
 
-  await test("writing false is hidden and API denied", async () => {
+  await test("legacy writing false no longer disables the standard feature", async () => {
     const db = baseDb({ writingEnabled: false });
     await registerWritingStudentSession({
       db,
@@ -180,10 +180,10 @@ function baseDb({ writingEnabled } = {}) {
       },
     });
     const status = await getWritingFeatureStatus({ db, authUid: "authA" });
-    assert.strictEqual(status.enabled, false);
-    await assert.rejects(
-      () => assertWritingEnabledForAuth({ db, authUid: "authA" }),
-      /利用できません/
+    assert.strictEqual(status.enabled, true);
+    assert.strictEqual(
+      (await assertWritingEnabledForAuth({ db, authUid: "authA" })).enabled,
+      true
     );
   });
 
@@ -227,10 +227,9 @@ function baseDb({ writingEnabled } = {}) {
       ),
       true
     );
-    await assert.rejects(
-      () => assertWritingEnabledForAuth({ db, authUid: "authA" }),
-      WritingAccessError
-    );
+    const status = await assertWritingEnabledForAuth({ db, authUid: "authA" });
+    assert.strictEqual(status.schoolId, "schoolA");
+    assert.strictEqual(status.enabled, true);
   });
 
   await test("admin can toggle exact school and non-admin cannot", async () => {
@@ -258,6 +257,21 @@ function baseDb({ writingEnabled } = {}) {
     ).data();
     assert.strictEqual(flag.enabled, true);
     assert.strictEqual(flag.schoolId, "schoolA");
+  });
+
+  await test("legacy admin disable request keeps writing enabled", async () => {
+    const db = baseDb({ writingEnabled: true });
+    const result = await setSchoolWritingFeature({
+      db,
+      admin: fakeAdmin,
+      uid: "admin1",
+      data: { schoolId: "schoolA", enabled: false },
+    });
+    assert.deepStrictEqual(result, { schoolId: "schoolA", enabled: true });
+    const flag = (
+      await db.collection("writingFeatureFlags").doc("schoolA").get()
+    ).data();
+    assert.strictEqual(flag.enabled, true);
   });
 
   await test("invalid password does not bind auth UID", async () => {
