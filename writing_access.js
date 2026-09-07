@@ -73,7 +73,9 @@ async function setSchoolWritingFeature({ db, admin, uid, data }) {
 
   await db.collection(FEATURE_FLAGS_COLLECTION).doc(schoolId).set(
     {
-      enabled: data.enabled,
+      // Legacy Admin clients may still call this endpoint. Preserve the
+      // document shape, but never allow a standard feature to be disabled.
+      enabled: true,
       schoolId,
       updatedAt: FieldValue.serverTimestamp(),
       updatedBy: uid,
@@ -83,7 +85,7 @@ async function setSchoolWritingFeature({ db, admin, uid, data }) {
 
   return {
     schoolId,
-    enabled: data.enabled,
+    enabled: true,
   };
 }
 
@@ -176,15 +178,10 @@ async function resolveWritingSession({ db, authUid }) {
 
 async function getWritingFeatureStatus({ db, authUid }) {
   const session = await resolveWritingSession({ db, authUid });
-  const flagSnap = await db
-    .collection(FEATURE_FLAGS_COLLECTION)
-    .doc(session.schoolId)
-    .get();
-  const enabled = flagSnap.exists
-    ? isWritingEnabledFromFeatureFlagData(flagSnap.data()) === true
-    : false;
   return {
-    enabled,
+    // Writing is a standard feature. Keep this compatibility endpoint for
+    // older clients, but do not gate access on the legacy per-school flag.
+    enabled: true,
     schoolId: session.schoolId,
   };
 }
