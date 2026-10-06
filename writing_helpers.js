@@ -14,9 +14,10 @@ const CORRECTION_TYPES = new Set([
 ]);
 
 class WritingFunctionError extends Error {
-  constructor(code, message) {
+  constructor(code, message, details = null) {
     super(message);
     this.code = code;
+    this.details = details;
   }
 }
 
@@ -173,7 +174,8 @@ const ocrSchema = {
 function buildCorrectionPayload(text) {
   return {
     model: WRITING_MODEL,
-    max_completion_tokens: 1200,
+    reasoning_effort: "low",
+    max_completion_tokens: 4000,
     response_format: {
       type: "json_schema",
       json_schema: {
@@ -253,7 +255,8 @@ function validateOcrInput(data) {
 function buildOcrPayload({ imageBase64, mimeType }) {
   return {
     model: WRITING_OCR_MODEL,
-    max_completion_tokens: 500,
+    reasoning_effort: "low",
+    max_completion_tokens: 2000,
     response_format: {
       type: "json_schema",
       json_schema: {
@@ -266,10 +269,19 @@ function buildOcrPayload({ imageBase64, mimeType }) {
       {
         role: "system",
         content: [
-          "You extract handwritten or printed English from a student photo.",
-          "Return JSON only. Do not correct grammar or spelling. Preserve the student's English as written.",
-          "If a word is unclear, transcribe the best guess and include it in uncertainParts. Use [不明] only when unreadable.",
-          "If the image is mirrored, rotated, upside down, or partially blocked, still read the English as naturally as possible.",
+          "You are a forensic transcription engine for handwritten or printed student English.",
+          "Your task is character-faithful transcription, not correction, interpretation, reconstruction, or translation.",
+          "Copy exactly what is visibly written, including misspellings, malformed words, grammar errors, capitalization, punctuation, and repeated words.",
+          "Do not add, remove, reorder, normalize, expand, or paraphrase any word or phrase.",
+          "Never replace a visible word with a more likely, more grammatical, or more contextually natural word.",
+          "Never use the sentence meaning to complete or rewrite unclear letters. For example, preserve 'techer', 'futer', or 'would likes' exactly when those letter forms are visible.",
+          "When one or more letters cannot be read confidently, do not make a best guess. Put [不明] at that exact position and add the affected visible fragment to uncertainParts with a concise Japanese reason.",
+          "A plausible English sentence is less important than an honest literal transcription. Prefer [不明] over semantic prediction.",
+          "You may join a purely visual line wrap within the same sentence, but must not change any character, word, spelling, grammar, punctuation, or meaning while doing so.",
+          "Required verbatim examples: if the image says \"I'm also like to make apps to improve my English skills.\", output exactly that; never output \"I also like to use apps\".",
+          "If the image says \"I hope this writing can read by AI\", output exactly that; never output \"can be read by AI\" or \"can lead by AI\".",
+          "If the image is mirrored, rotated, upside down, or partially blocked, account for its orientation but keep the transcription literal.",
+          "Return JSON only and always follow the requested schema.",
           "Do not include personal information unrelated to the English writing task.",
         ].join("\n"),
       },
@@ -284,6 +296,7 @@ function buildOcrPayload({ imageBase64, mimeType }) {
             type: "image_url",
             image_url: {
               url: `data:${mimeType};base64,${imageBase64}`,
+              detail: "high",
             },
           },
         ],
@@ -346,7 +359,8 @@ async function callOpenAiCorrection({
     if (!content) {
       throw new WritingFunctionError(
         "internal",
-        "Writing添削APIの応答に本文がありません。"
+        "Writing添削APIの応答に本文がありません。",
+        describeEmptyOpenAiResponse(parsed)
       );
     }
 
@@ -445,7 +459,8 @@ async function callOpenAiOcr({
     if (!content) {
       throw new WritingFunctionError(
         "internal",
-        "Writing OCR APIの応答に本文がありません。"
+        "Writing OCR APIの応答に本文がありません。",
+        describeEmptyOpenAiResponse(parsed)
       );
     }
 
@@ -504,6 +519,32 @@ function extractMessageContent(parsed) {
     }).join("").trim();
   }
   return "";
+}
+
+function describeEmptyOpenAiResponse(parsed) {
+  const choice = Array.isArray(parsed?.choices) ? parsed.choices[0] : null;
+  const message = choice && typeof choice.message === "object"
+    ? choice.message
+    : null;
+  const usage = parsed && typeof parsed.usage === "object" ? parsed.usage : {};
+  return {
+    responseId: typeof parsed?.id === "string" ? parsed.id : null,
+    model: typeof parsed?.model === "string" ? parsed.model : null,
+    finishReason:
+      typeof choice?.finish_reason === "string" ? choice.finish_reason : null,
+    refusal: typeof message?.refusal === "string" ? message.refusal : null,
+    promptTokens: Number.isInteger(usage.prompt_tokens)
+      ? usage.prompt_tokens
+      : null,
+    completionTokens: Number.isInteger(usage.completion_tokens)
+      ? usage.completion_tokens
+      : null,
+    reasoningTokens: Number.isInteger(
+      usage.completion_tokens_details?.reasoning_tokens
+    )
+      ? usage.completion_tokens_details.reasoning_tokens
+      : null,
+  };
 }
 
 function extractJsonObjectText(content) {
@@ -727,6 +768,7 @@ module.exports = {
   callOpenAiCorrection,
   callOpenAiOcr,
   extractMessageContent,
+  describeEmptyOpenAiResponse,
   extractJsonObjectText,
   correctWritingHandler,
   extractWritingTextFromImageHandler,

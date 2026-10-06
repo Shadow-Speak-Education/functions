@@ -1,0 +1,32 @@
+[
+  {
+    "id": "demo_example_q1",
+    "prompt": "What does learning English take?",
+    "choices": [
+      "Practice",
+      "A long trip",
+      "A new computer",
+      "No effort"
+    ],
+    "correctIndex": 0,
+    "explanation": {
+      "summaryJa": "英文では、英語の学習には練習が必要だと述べています。その内容と一致する「Practice」が正解です。",
+      "evidenceEn": "Learning English takes practice."
+    }
+  },
+  {
+    "id": "demo_example_q2",
+    "prompt": "How should the learner speak?",
+    "choices": [
+      "Clearly",
+      "Very quietly",
+      "Only once",
+      "Without listening"
+    ],
+    "correctIndex": 0,
+    "explanation": {
+      "summaryJa": "英文では、注意深く聞き、はっきり話すよう促しています。そのため「Clearly」が正解です。",
+      "evidenceEn": "Listen carefully, speak clearly, and try again."
+    }
+  }
+]

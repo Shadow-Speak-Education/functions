@@ -23,24 +23,73 @@ const {
 const {
   WritingAccessError,
   toHttpsError,
+  authenticateStudentSession,
+  refreshStudentSession,
   registerWritingStudentSession,
   getWritingFeatureStatus,
   setSchoolWritingFeature,
   assertWritingEnabledForAuth,
   recordDemoWritingAttempt,
 } = require("./writing_access");
+const {
+  listWritingPerformanceTests,
+  listWritingPerformanceTestsForPreview,
+  submitWritingPerformanceTest,
+} = require("./writing_performance");
+const {
+  authenticateWritingTeacher,
+  refreshWritingTeacherSession,
+  resolveWritingTeacherSession,
+  getTeacherProfileForTeacher,
+  createWritingPerformanceTestForTeacher,
+  copyWritingPerformanceTestForTeacher,
+  listWritingPerformanceTestsForTeacher,
+  listWritingClassesForTeacher,
+  setWritingPerformanceTestActiveForTeacher,
+  deleteWritingPerformanceTestForTeacher,
+  listWritingPerformanceSubmissionsForTeacher,
+  getWritingPerformanceSubmissionForTeacher,
+  saveWritingPerformanceReviewForTeacher,
+  saveWritingPerformanceQuickEvaluationForTeacher,
+} = require("./writing_teacher");
+const {
+  assertDemoManager,
+  assertSuperAdmin,
+  deleteDemoEnvironment,
+  getDemoCredentials,
+  getDemoAuthenticationForAdmin,
+  initializeDemoEnvironment,
+  setDemoAuthentication,
+  setDemoVisibility,
+} = require("./demo_environment");
 
 // 🔥 ffmpeg（WebM → WAV 変換）
 const ffmpegPath = require("ffmpeg-static");
 const ffmpeg = require("fluent-ffmpeg");
 
 // ---- Firebase init
-admin.initializeApp({ projectId: "shadow-speak-school" });
+admin.initializeApp({
+  projectId: "shadow-speak-school",
+  storageBucket: "shadow-speak-school.firebasestorage.app",
+});
 const db = admin.firestore();
 const storage = admin.storage();
 const enforceWritingAccess =
   process.env.FUNCTIONS_EMULATOR !== "true" ||
   process.env.WRITING_ENFORCE_ACCESS === "true";
+
+async function assertSimpleWritingAccess(authUid) {
+  try {
+    return await assertWritingEnabledForAuth({ db, authUid });
+  } catch (studentError) {
+    try {
+      const teacher = await resolveWritingTeacherSession({ db, authUid });
+      return { enabled: true, schoolId: teacher.schoolId };
+    } catch (_) {
+      throw studentError;
+    }
+  }
+}
 
 // ---- Global options
 setGlobalOptions({
@@ -83,6 +132,148 @@ exports.registerWritingStudentSession = onCall(
       });
       throw new HttpsError("internal", "Writing認証に失敗しました。");
     }
+  }
+);
+
+exports.authenticateStudent = onCall(
+  {
+    region: "asia-northeast1",
+    timeoutSeconds: 30,
+    memory: "256MiB",
+  },
+  async (req) => {
+    if (!req.auth?.uid) throw new HttpsError("unauthenticated", "ログインが必要です。");
+    try {
+      return await authenticateStudentSession({
+        db,
+        authUid: req.auth.uid,
+        data: req.data,
+      });
+    } catch (error) {
+      if (error instanceof WritingAccessError) throw toHttpsError(error);
+      console.error("🚨 authenticateStudent failed", {
+        message: error?.message || String(error),
+      });
+      throw new HttpsError("internal", "生徒認証に失敗しました。");
+    }
+  }
+);
+
+exports.refreshStudentSession = onCall(
+  { region: "asia-northeast1", timeoutSeconds: 30, memory: "256MiB" },
+  async (req) => {
+    if (!req.auth?.uid) throw new HttpsError("unauthenticated", "ログインが必要です。");
+    try {
+      return await refreshStudentSession({ db, authUid: req.auth.uid });
+    } catch (error) {
+      if (error instanceof WritingAccessError) throw toHttpsError(error);
+      console.error("🚨 refreshStudentSession failed", { message: error?.message || String(error) });
+      throw new HttpsError("internal", "生徒セッションの更新に失敗しました。");
+    }
+  }
+);
+
+exports.initializeTeacherSalesDemo = onCall(
+  {
+    region: "asia-northeast1",
+    timeoutSeconds: 120,
+    memory: "512MiB",
+  },
+  async (req) => {
+    const schoolId = String(req.data && req.data.schoolId || "").trim();
+    const actor = await assertDemoManager({
+      db,
+      request: req,
+      requestedSchoolId: schoolId,
+    });
+    return initializeDemoEnvironment({
+      db,
+      bucket: storage.bucket(),
+      admin,
+      schoolId,
+      actor,
+    });
+  }
+);
+
+exports.deleteTeacherSalesDemo = onCall(
+  {
+    region: "asia-northeast1",
+    timeoutSeconds: 120,
+    memory: "512MiB",
+  },
+  async (req) => {
+    const schoolId = String(req.data && req.data.schoolId || "").trim();
+    await assertDemoManager({ db, request: req, requestedSchoolId: schoolId });
+    return deleteDemoEnvironment({
+      db,
+      bucket: storage.bucket(),
+      admin,
+      schoolId,
+    });
+  }
+);
+
+exports.getTeacherSalesDemoCredentials = onCall(
+  {
+    region: "asia-northeast1",
+    timeoutSeconds: 30,
+    memory: "256MiB",
+  },
+  async (req) => {
+    const schoolId = String(req.data && req.data.schoolId || "").trim();
+    await assertDemoManager({ db, request: req, requestedSchoolId: schoolId });
+    return getDemoCredentials({ db, schoolId });
+  }
+);
+
+exports.setTeacherSalesDemoAuthentication = onCall(
+  {
+    region: "asia-northeast1",
+    timeoutSeconds: 30,
+    memory: "256MiB",
+  },
+  async (req) => {
+    const schoolId = String(req.data && req.data.schoolId || "").trim();
+    const actor = await assertSuperAdmin({ db, request: req });
+    return setDemoAuthentication({
+      db,
+      admin,
+      schoolId,
+      password: req.data && req.data.password,
+      actorUid: actor.uid,
+    });
+  }
+);
+
+exports.getTeacherSalesDemoAuthenticationForAdmin = onCall(
+  {
+    region: "asia-northeast1",
+    timeoutSeconds: 30,
+    memory: "256MiB",
+  },
+  async (req) => {
+    const schoolId = String(req.data && req.data.schoolId || "").trim();
+    await assertSuperAdmin({ db, request: req });
+    return getDemoAuthenticationForAdmin({ db, schoolId });
+  }
+);
+
+exports.setTeacherSalesDemoVisibility = onCall(
+  {
+    region: "asia-northeast1",
+    timeoutSeconds: 60,
+    memory: "256MiB",
+  },
+  async (req) => {
+    const schoolId = String(req.data && req.data.schoolId || "").trim();
+    await assertDemoManager({ db, request: req, requestedSchoolId: schoolId });
+    return setDemoVisibility({
+      db,
+      admin,
+      schoolId,
+      visible: req.data && req.data.visible,
+    });
   }
 );
 
@@ -168,10 +359,7 @@ exports.correctWriting = onCall(
 
     try {
       if (enforceWritingAccess) {
-        const writingStatus = await assertWritingEnabledForAuth({
-          db,
-          authUid: req.auth.uid,
-        });
+        const writingStatus = await assertSimpleWritingAccess(req.auth.uid);
         const demoSchoolId = process.env.WRITING_DEMO_SCHOOL_ID || "";
         if (
           demoSchoolId &&
@@ -212,6 +400,11 @@ exports.correctWriting = onCall(
     } catch (error) {
       if (error instanceof WritingAccessError) throw toHttpsError(error);
       if (error instanceof WritingFunctionError) {
+        console.error("🚨 correctWriting API error", {
+          code: error.code,
+          message: error.message,
+          details: error.details || null,
+        });
         throw new HttpsError(error.code, error.message);
       }
       console.error("🚨 correctWriting failed", {
@@ -250,10 +443,7 @@ exports.extractWritingTextFromImage = onCall(
 
     try {
       if (enforceWritingAccess) {
-        await assertWritingEnabledForAuth({
-          db,
-          authUid: req.auth.uid,
-        });
+        await assertSimpleWritingAccess(req.auth.uid);
       }
 
       const result = await extractWritingTextFromImageHandler({
@@ -270,6 +460,11 @@ exports.extractWritingTextFromImage = onCall(
     } catch (error) {
       if (error instanceof WritingAccessError) throw toHttpsError(error);
       if (error instanceof WritingFunctionError) {
+        console.error("🚨 extractWritingTextFromImage API error", {
+          code: error.code,
+          message: error.message,
+          details: error.details || null,
+        });
         throw new HttpsError(error.code, error.message);
       }
       console.error("🚨 extractWritingTextFromImage failed", {
@@ -282,6 +477,172 @@ exports.extractWritingTextFromImage = onCall(
       );
     }
   }
+);
+
+exports.listWritingPerformanceTests = onCall(
+  {
+    region: "asia-northeast1",
+    timeoutSeconds: 30,
+    memory: "256MiB",
+  },
+  async (req) => {
+    if (!req.auth?.uid) throw new HttpsError("unauthenticated", "ログインが必要です。");
+    try {
+      if (req.auth.token?.role === "teacher_preview") {
+        return await listWritingPerformanceTestsForPreview({
+          db,
+          token: req.auth.token,
+          data: req.data,
+        });
+      }
+      await assertWritingEnabledForAuth({ db, authUid: req.auth.uid });
+      return await listWritingPerformanceTests({
+        db,
+        authUid: req.auth.uid,
+        data: req.data,
+      });
+    } catch (error) {
+      if (error instanceof WritingAccessError) throw toHttpsError(error);
+      if (error instanceof WritingFunctionError) {
+        throw new HttpsError(error.code, error.message);
+      }
+      console.error("🚨 listWritingPerformanceTests failed", {
+        message: error?.message || String(error),
+      });
+      throw new HttpsError("internal", "Writing課題一覧の取得に失敗しました。");
+    }
+  }
+);
+
+exports.submitWritingPerformanceTest = onCall(
+  {
+    region: "asia-northeast1",
+    secrets: [OPENAI_API_KEY],
+    timeoutSeconds: 90,
+    memory: "512MiB",
+  },
+  async (req) => {
+    if (!req.auth?.uid) throw new HttpsError("unauthenticated", "ログインが必要です。");
+    try {
+      await assertWritingEnabledForAuth({ db, authUid: req.auth.uid });
+      return await submitWritingPerformanceTest({
+        db,
+        admin,
+        authUid: req.auth.uid,
+        data: req.data,
+        apiKey: process.env.OPENAI_API_KEY,
+        fetchImpl: fetch,
+      });
+    } catch (error) {
+      if (error instanceof WritingAccessError) throw toHttpsError(error);
+      if (error instanceof WritingFunctionError) {
+        throw new HttpsError(error.code, error.message);
+      }
+      console.error("🚨 submitWritingPerformanceTest failed", {
+        message: error?.message || String(error),
+      });
+      throw new HttpsError("internal", "Writing課題の提出に失敗しました。");
+    }
+  }
+);
+
+function teacherWritingCallable(handler, failureMessage) {
+  return onCall(
+    { region: "asia-northeast1", timeoutSeconds: 30, memory: "256MiB" },
+    async (req) => {
+      if (!req.auth?.uid) throw new HttpsError("unauthenticated", "ログインが必要です。");
+      try {
+        return await handler({ db, authUid: req.auth.uid, data: req.data });
+      } catch (error) {
+        if (error instanceof WritingAccessError) throw toHttpsError(error);
+        if (error instanceof WritingFunctionError) throw new HttpsError(error.code, error.message);
+        console.error(`🚨 ${failureMessage}`, { message: error?.message || String(error) });
+        throw new HttpsError("internal", failureMessage);
+      }
+    }
+  );
+}
+
+exports.authenticateWritingTeacher = teacherWritingCallable(
+  authenticateWritingTeacher,
+  "教師用Writing認証に失敗しました。"
+);
+exports.refreshWritingTeacherSession = teacherWritingCallable(
+  refreshWritingTeacherSession,
+  "教師セッションの更新に失敗しました。"
+);
+exports.createStudentAppPreviewToken = teacherWritingCallable(
+  async ({ db: firestore, authUid, data }) => {
+    const session = await resolveWritingTeacherSession({
+      db: firestore,
+      authUid,
+    });
+    const classId = String(data?.classId || "").trim();
+    if (!classId || classId.includes("/")) {
+      throw new WritingAccessError("invalid-argument", "クラス情報が不正です。");
+    }
+    const classSnap = await firestore
+      .collection("schools")
+      .doc(session.schoolId)
+      .collection("classes")
+      .doc(classId)
+      .get();
+    if (!classSnap.exists) {
+      throw new WritingAccessError("not-found", "対象クラスが見つかりません。");
+    }
+    const token = await admin.auth().createCustomToken(authUid, {
+      role: "teacher_preview",
+      schoolId: session.schoolId,
+      teacherId: session.teacherId,
+      classId,
+    });
+    return { token };
+  },
+  "生徒アプリのプレビュー認証に失敗しました。"
+);
+exports.getTeacherProfile = teacherWritingCallable(
+  getTeacherProfileForTeacher,
+  "教師プロフィールの取得に失敗しました。"
+);
+exports.createWritingPerformanceTestForTeacher = teacherWritingCallable(
+  createWritingPerformanceTestForTeacher,
+  "Writing課題の作成に失敗しました。"
+);
+exports.listWritingPerformanceTestsForTeacher = teacherWritingCallable(
+  listWritingPerformanceTestsForTeacher,
+  "教師用Writing課題一覧の取得に失敗しました。"
+);
+exports.listWritingClassesForTeacher = teacherWritingCallable(
+  listWritingClassesForTeacher,
+  "Writingコピー先クラス一覧の取得に失敗しました。"
+);
+exports.copyWritingPerformanceTestForTeacher = teacherWritingCallable(
+  copyWritingPerformanceTestForTeacher,
+  "Writing課題のコピーに失敗しました。"
+);
+exports.setWritingPerformanceTestActiveForTeacher = teacherWritingCallable(
+  setWritingPerformanceTestActiveForTeacher,
+  "Writing課題の公開状態更新に失敗しました。"
+);
+exports.deleteWritingPerformanceTestForTeacher = teacherWritingCallable(
+  deleteWritingPerformanceTestForTeacher,
+  "Writing課題の削除に失敗しました。"
+);
+exports.listWritingPerformanceSubmissionsForTeacher = teacherWritingCallable(
+  listWritingPerformanceSubmissionsForTeacher,
+  "Writing提出一覧の取得に失敗しました。"
+);
+exports.getWritingPerformanceSubmissionForTeacher = teacherWritingCallable(
+  getWritingPerformanceSubmissionForTeacher,
+  "Writing提出詳細の取得に失敗しました。"
+);
+exports.saveWritingPerformanceReviewForTeacher = teacherWritingCallable(
+  saveWritingPerformanceReviewForTeacher,
+  "Writing最終評価の保存に失敗しました。"
+);
+exports.saveWritingPerformanceQuickEvaluationForTeacher = teacherWritingCallable(
+  saveWritingPerformanceQuickEvaluationForTeacher,
+  "Writing教員最終点の保存に失敗しました。"
 );
 
 /* =========================================================

@@ -6,8 +6,9 @@
     "serve": "firebase emulators:start --only functions",
     "shell": "firebase functions:shell",
     "start": "npm run shell",
-    "test": "node test/writing_helpers.test.js && node test/writing_access.test.js",
-    "build": "node --check index.js && node --check writing_helpers.js && node --check writing_access.js",
+    "test": "node test/writing_helpers.test.js && node test/writing_access.test.js && node test/writing_performance.test.js && node test/writing_teacher.test.js && node --test test/demo_environment.test.js",
+    "test:rules": "firebase emulators:exec --config firebase.rules-audit.json --project shadow-speak-rules-audit --only firestore \"node test/firestore_candidate_rules.test.js\"",
+    "build": "node --check index.js && node --check writing_helpers.js && node --check writing_access.js && node --check writing_performance.js && node --check writing_teacher.js && node --check demo_environment.js",
     "deploy": "firebase deploy --only functions",
     "logs": "firebase functions:log"
   },
@@ -27,6 +28,8 @@
     "openai": "6.7.0"
   },
   "devDependencies": {
+    "@firebase/rules-unit-testing": "^4.0.1",
+    "firebase": "^11.10.0",
     "firebase-functions-test": "^3.1.0"
   },
   "private": true

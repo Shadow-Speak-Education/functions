@@ -8,6 +8,10 @@ node_modules/
 venv/
 **/venv/
 __pycache__/
+
+# Local emulator config
+firebase.local-writing.json
+firebase.local-writing-demo.json
 *.pyc
 
 # Python venv

@@ -1,0 +1,790 @@
+[
+  {
+    "id": "je1800_0001",
+    "number": 1,
+    "english": "I",
+    "japanese": "私は［が］",
+    "word": "I",
+    "meaningJa": "私は［が］",
+    "phonetic": "/aɪ/",
+    "example": "I am a student.",
+    "exampleJa": "私は生徒です。",
+    "acceptableAnswers": [
+      "I"
+    ],
+    "choicesJa": [
+      "特別の、特殊な",
+      "赤い、赤色（の）、赤",
+      "私は［が］",
+      "自転車"
+    ],
+    "choicesEn": [
+      "business",
+      "realize",
+      "I",
+      "rise"
+    ]
+  },
+  {
+    "id": "je1800_0002",
+    "number": 2,
+    "english": "you",
+    "japanese": "あなたに［を］ 2. あなたは［が］ 3.  あなたたちは［が］",
+    "word": "you",
+    "meaningJa": "あなたに［を］ 2. あなたは［が］ 3.  あなたたちは［が］",
+    "phonetic": "/juː/",
+    "example": "You are my friend.",
+    "exampleJa": "あなたは私の友達です。",
+    "acceptableAnswers": [
+      "you"
+    ],
+    "choicesJa": [
+      "愛、恋愛 2.   リサより",
+      "4番め、（月の）4日",
+      "（人がもの）を形作る",
+      "あなたに［を］ 2. あなたは［が］ 3.  あなたたちは［が］"
+    ],
+    "choicesEn": [
+      "neck",
+      "motto",
+      "you",
+      "model"
+    ]
+  },
+  {
+    "id": "je1800_0003",
+    "number": 3,
+    "english": "he",
+    "japanese": "彼は［が］、その（男の）人は［が］",
+    "word": "he",
+    "meaningJa": "彼は［が］、その（男の）人は［が］",
+    "phonetic": "/hiː/",
+    "example": "He plays soccer.",
+    "exampleJa": "彼はサッカーをします。",
+    "acceptableAnswers": [
+      "he"
+    ],
+    "choicesJa": [
+      "あし",
+      "child の複数形",
+      "彼は［が］、その（男の）人は［が］",
+      "雑誌"
+    ],
+    "choicesEn": [
+      "look for",
+      "he",
+      "floor",
+      "egg"
+    ]
+  },
+  {
+    "id": "je1800_0004",
+    "number": 4,
+    "english": "she",
+    "japanese": "彼女は［が］、あの女の人は［が］、あの女の子は［が］",
+    "word": "she",
+    "meaningJa": "彼女は［が］、あの女の人は［が］、あの女の子は［が］",
+    "phonetic": "/ʃiː/",
+    "example": "She likes music.",
+    "exampleJa": "彼女は音楽が好きです。",
+    "acceptableAnswers": [
+      "she"
+    ],
+    "choicesJa": [
+      "～から作られている",
+      "風",
+      "彼女は［が］、あの女の人は［が］、あの女の子は［が］",
+      "うわあ、ああ、ま"
+    ],
+    "choicesEn": [
+      "sixth",
+      "she",
+      "especially",
+      "six"
+    ]
+  },
+  {
+    "id": "je1800_0005",
+    "number": 5,
+    "english": "it",
+    "japanese": "それは［が］ 2. それを［に］ 3.  Ａ［人］が…するのは～だ 4.",
+    "word": "it",
+    "meaningJa": "それは［が］ 2. それを［に］ 3.  Ａ［人］が…するのは～だ 4.",
+    "phonetic": "/ɪt/",
+    "example": "It is a new book.",
+    "exampleJa": "それは新しい本です。",
+    "acceptableAnswers": [
+      "it"
+    ],
+    "choicesJa": [
+      "私たちを［に］",
+      "サッカー",
+      "インタビュー、会見、面接",
+      "それは［が］ 2. それを［に］ 3.  Ａ［人］が…するのは～だ 4."
+    ],
+    "choicesEn": [
+      "it",
+      "fifty",
+      "end",
+      "shut"
+    ]
+  },
+  {
+    "id": "je1800_0006",
+    "number": 6,
+    "english": "we",
+    "japanese": "私たちは［が］",
+    "word": "we",
+    "meaningJa": "私たちは［が］",
+    "phonetic": "/wiː/",
+    "example": "We study English.",
+    "exampleJa": "私たちは英語を勉強します。",
+    "acceptableAnswers": [
+      "we"
+    ],
+    "choicesJa": [
+      "～を撃つ",
+      "いつ",
+      "フランス",
+      "私たちは［が］"
+    ],
+    "choicesEn": [
+      "we",
+      "realize",
+      "slow",
+      "down"
+    ]
+  },
+  {
+    "id": "je1800_0007",
+    "number": 7,
+    "english": "they",
+    "japanese": "彼らが［は］、彼女たちが［は］、それらが［は］",
+    "word": "they",
+    "meaningJa": "彼らが［は］、彼女たちが［は］、それらが［は］",
+    "phonetic": "/ðeɪ/",
+    "example": "They live in Japan.",
+    "exampleJa": "彼らは日本に住んでいます。",
+    "acceptableAnswers": [
+      "they"
+    ],
+    "choicesJa": [
+      "ヒット（曲）",
+      "（客を接待する）主人（役）",
+      "さがす ～をさがす",
+      "彼らが［は］、彼女たちが［は］、それらが［は］"
+    ],
+    "choicesEn": [
+      "soldier",
+      "volume",
+      "they",
+      "twenty-sixth"
+    ]
+  },
+  {
+    "id": "je1800_0008",
+    "number": 8,
+    "english": "be",
+    "japanese": "～である、～にいる",
+    "word": "be",
+    "meaningJa": "～である、～にいる",
+    "phonetic": "/biː/",
+    "example": "I want to be a teacher.",
+    "exampleJa": "私は先生になりたいです。",
+    "acceptableAnswers": [
+      "be",
+      "am",
+      "are",
+      "is"
+    ],
+    "choicesJa": [
+      "幸せな､うれしい､たのしい 2. おめでとう  新年おめでとう",
+      "ボランティア、志願者",
+      "～である、～にいる",
+      "サイクリング"
+    ],
+    "choicesEn": [
+      "be",
+      "chart",
+      "instead",
+      "low"
+    ]
+  },
+  {
+    "id": "je1800_0009",
+    "number": 9,
+    "english": "have",
+    "japanese": "～を持っている、～がある",
+    "word": "have",
+    "meaningJa": "～を持っている、～がある",
+    "phonetic": "/hæv/",
+    "example": "I have a new bike.",
+    "exampleJa": "私は新しい自転車を持っています。",
+    "acceptableAnswers": [
+      "have",
+      "has"
+    ],
+    "choicesJa": [
+      "標語、モットー",
+      "寝室",
+      "～を持っている、～がある",
+      "水泳"
+    ],
+    "choicesEn": [
+      "be surprised at",
+      "have",
+      "November",
+      "tenth"
+    ]
+  },
+  {
+    "id": "je1800_0010",
+    "number": 10,
+    "english": "do",
+    "japanese": "～をする",
+    "word": "do",
+    "meaningJa": "～をする",
+    "phonetic": "/duː/",
+    "example": "I do my homework every day.",
+    "exampleJa": "私は毎日宿題をします。",
+    "acceptableAnswers": [
+      "do",
+      "did",
+      "done",
+      "does"
+    ],
+    "choicesJa": [
+      "環境",
+      "～をする",
+      "アルバム",
+      "いつでも"
+    ],
+    "choicesEn": [
+      "traveling",
+      "peace",
+      "do",
+      "sock"
+    ]
+  },
+  {
+    "id": "je1800_0011",
+    "number": 11,
+    "english": "can",
+    "japanese": "～できる、～してもよい",
+    "word": "can",
+    "meaningJa": "～できる、～してもよい",
+    "phonetic": "/kæn/",
+    "example": "I can swim well.",
+    "exampleJa": "私は上手に泳げます。",
+    "acceptableAnswers": [
+      "can",
+      "cannot"
+    ],
+    "choicesJa": [
+      "～できる、～してもよい",
+      "憎しみ",
+      "ただ１人の",
+      "浜、浜辺、海辺、なぎさ"
+    ],
+    "choicesEn": [
+      "grandson",
+      "near",
+      "lose",
+      "can"
+    ]
+  },
+  {
+    "id": "je1800_0012",
+    "number": 12,
+    "english": "will",
+    "japanese": "～するつもりだ、～だろう",
+    "word": "will",
+    "meaningJa": "～するつもりだ、～だろう",
+    "phonetic": "/wɪl/",
+    "example": "I will call you tomorrow.",
+    "exampleJa": "私は明日あなたに電話します。",
+    "acceptableAnswers": [
+      "will"
+    ],
+    "choicesJa": [
+      "もっと多くの数（量）、もっと多くのこと（もの、人）",
+      "過去",
+      "～するつもりだ、～だろう",
+      "宇宙飛行士"
+    ],
+    "choicesEn": [
+      "album",
+      "cold",
+      "whose",
+      "will"
+    ]
+  },
+  {
+    "id": "je1800_0013",
+    "number": 13,
+    "english": "my",
+    "japanese": "私の",
+    "word": "my",
+    "meaningJa": "私の",
+    "phonetic": "/maɪ/",
+    "example": "Today, It's my mother's.",
+    "exampleJa": "今日、それは私の母のものです。",
+    "acceptableAnswers": [
+      "my"
+    ],
+    "choicesJa": [
+      "入浴する",
+      "～がほしい 2.  ～したい 3.  Ａ［人］に～してほしい",
+      "だれのもの、だれの",
+      "私の"
+    ],
+    "choicesEn": [
+      "carry",
+      "my",
+      "fascinate",
+      "whole"
+    ]
+  },
+  {
+    "id": "je1800_0014",
+    "number": 14,
+    "english": "your",
+    "japanese": "あなた（たち）の 2.   あなたたちの",
+    "word": "your",
+    "meaningJa": "あなた（たち）の 2.   あなたたちの",
+    "phonetic": "/jɔr/",
+    "example": "In class, Is this your dictionary?",
+    "exampleJa": "授業で、これはあなたの辞書ですか。",
+    "acceptableAnswers": [
+      "your"
+    ],
+    "choicesJa": [
+      "あなた（たち）の 2.   あなたたちの",
+      "死、死亡",
+      "（建物・部屋・場所など）に入る",
+      "どうにかやっていく、なんとかうまく～する"
+    ],
+    "choicesEn": [
+      "ocean",
+      "in the future",
+      "your",
+      "blog"
+    ]
+  },
+  {
+    "id": "je1800_0015",
+    "number": 15,
+    "english": "his",
+    "japanese": "彼の 2. 彼のもの",
+    "word": "his",
+    "meaningJa": "彼の 2. 彼のもの",
+    "phonetic": "/hɪz/",
+    "example": "At school, Is this his CD?",
+    "exampleJa": "学校で、これは彼のCDですか。",
+    "acceptableAnswers": [
+      "his"
+    ],
+    "choicesJa": [
+      "おいしい",
+      "南",
+      "彼の 2. 彼のもの",
+      "交通 交通信号（灯）"
+    ],
+    "choicesEn": [
+      "prince",
+      "post",
+      "thinking",
+      "his"
+    ]
+  },
+  {
+    "id": "je1800_0016",
+    "number": 16,
+    "english": "her",
+    "japanese": "彼女を［に］ 2. 彼女の",
+    "word": "her",
+    "meaningJa": "彼女を［に］ 2. 彼女の",
+    "phonetic": "/hɝ/",
+    "example": "Today, Do you know her?",
+    "exampleJa": "今日、あなたは彼女を知っていますか。",
+    "acceptableAnswers": [
+      "her"
+    ],
+    "choicesJa": [
+      "実際に, 本当に, 現実に",
+      "彼女を［に］ 2. 彼女の",
+      "教会",
+      "接続（すること）、つながり、関係"
+    ],
+    "choicesEn": [
+      "gather",
+      "her",
+      "desk",
+      "size"
+    ]
+  },
+  {
+    "id": "je1800_0017",
+    "number": 17,
+    "english": "our",
+    "japanese": "私たちの、ぼくたちの",
+    "word": "our",
+    "meaningJa": "私たちの、ぼくたちの",
+    "phonetic": "/ˈaʊɚ/",
+    "example": "After school, These are photos of our town.",
+    "exampleJa": "放課後、これらは私たちの町の写真です。",
+    "acceptableAnswers": [
+      "our"
+    ],
+    "choicesJa": [
+      "狩りをする",
+      "うちを恋しがる、故郷を慕う、ホームシックの",
+      "私たちの、ぼくたちの",
+      "けが、不調"
+    ],
+    "choicesEn": [
+      "our",
+      "quiz",
+      "visitor",
+      "him"
+    ]
+  },
+  {
+    "id": "je1800_0018",
+    "number": 18,
+    "english": "their",
+    "japanese": "彼らの、彼女らの、それらの",
+    "word": "their",
+    "meaningJa": "彼らの、彼女らの、それらの",
+    "phonetic": "/ðɛr/",
+    "example": "This morning, Ken helps his brothers with their homework.",
+    "exampleJa": "今朝、ジムは兄弟の宿題を手伝います。",
+    "acceptableAnswers": [
+      "their"
+    ],
+    "choicesJa": [
+      "目、視力、視線",
+      "制御 制御しきれなくなって",
+      "夜",
+      "彼らの、彼女らの、それらの"
+    ],
+    "choicesEn": [
+      "their",
+      "fridge",
+      "answer",
+      "childhood"
+    ]
+  },
+  {
+    "id": "je1800_0019",
+    "number": 19,
+    "english": "me",
+    "japanese": "わたしに［を］",
+    "word": "me",
+    "meaningJa": "わたしに［を］",
+    "phonetic": "/miː/",
+    "example": "Today, Please teach me English.",
+    "exampleJa": "今日、私に英語を教えてくれませんか。",
+    "acceptableAnswers": [
+      "me"
+    ],
+    "choicesJa": [
+      "韓国・朝鮮語、韓国人・朝鮮人",
+      "これ 2. こちら、そちら 3. この人、こちら 4. すでに述べたこと、このこと、これから述べること",
+      "歌うこと、歌唱",
+      "わたしに［を］"
+    ],
+    "choicesEn": [
+      "transportation",
+      "warming",
+      "me",
+      "chair"
+    ]
+  },
+  {
+    "id": "je1800_0020",
+    "number": 20,
+    "english": "him",
+    "japanese": "彼を［に］",
+    "word": "him",
+    "meaningJa": "彼を［に］",
+    "phonetic": "/hɪm/",
+    "example": "Today, Do you know him?",
+    "exampleJa": "今日、あなたは彼を知っていますか。",
+    "acceptableAnswers": [
+      "him"
+    ],
+    "choicesJa": [
+      "～を聞く、～が聞こえる 2. を耳にする 3.  ～から返信［便り］をもらう",
+      "感情、考え、感覚",
+      "彼を［に］",
+      "ドイツ"
+    ],
+    "choicesEn": [
+      "thinking",
+      "carport",
+      "classic",
+      "him"
+    ]
+  },
+  {
+    "id": "je1800_0021",
+    "number": 21,
+    "english": "us",
+    "japanese": "私たちを［に］",
+    "word": "us",
+    "meaningJa": "私たちを［に］",
+    "phonetic": "/ʌs/",
+    "example": "This morning, Our coach always tells us interesting stories.",
+    "exampleJa": "今朝、いつも私たちにおもしろいお話をしてくれます。",
+    "acceptableAnswers": [
+      "us"
+    ],
+    "choicesJa": [
+      "昨日",
+      "私たちを［に］",
+      "たくさんの",
+      "巻いたもの、－巻"
+    ],
+    "choicesEn": [
+      "lesson",
+      "us",
+      "programmer",
+      "presentation"
+    ]
+  },
+  {
+    "id": "je1800_0022",
+    "number": 22,
+    "english": "them",
+    "japanese": "それらを［に］、彼らを［に］、彼女たちを［に］",
+    "word": "them",
+    "meaningJa": "それらを［に］、彼らを［に］、彼女たちを［に］",
+    "phonetic": "/ðɛm/",
+    "example": "Today, He has two sons and he loves them.",
+    "exampleJa": "今日、彼には二人の息子がいて、彼らを愛しています。",
+    "acceptableAnswers": [
+      "them"
+    ],
+    "choicesJa": [
+      "人",
+      "それらを［に］、彼らを［に］、彼女たちを［に］",
+      "態度、考え方、見方",
+      "経験"
+    ],
+    "choicesEn": [
+      "salt",
+      "them",
+      "little",
+      "classroom"
+    ]
+  },
+  {
+    "id": "je1800_0023",
+    "number": 23,
+    "english": "this",
+    "japanese": "これ 2. こちら、そちら 3. この人、こちら 4. すでに述べたこと、このこと、これから述べること",
+    "word": "this",
+    "meaningJa": "これ 2. こちら、そちら 3. この人、こちら 4. すでに述べたこと、このこと、これから述べること",
+    "phonetic": "/ðɪs/",
+    "example": "Today, Hello, this is Ken White.",
+    "exampleJa": "今日、こんにちは、こちらはジム・ホワイトです。",
+    "acceptableAnswers": [
+      "this"
+    ],
+    "choicesJa": [
+      "正直な",
+      "これ 2. こちら、そちら 3. この人、こちら 4. すでに述べたこと、このこと、これから述べること",
+      "えさをやる、食物を与える",
+      "便利な、使いやすい、好都合な"
+    ],
+    "choicesEn": [
+      "with",
+      "this",
+      "prefer",
+      "pull"
+    ]
+  },
+  {
+    "id": "je1800_0024",
+    "number": 24,
+    "english": "that",
+    "japanese": "あれ、それ 2. あの［その］こと 3. あの［その］人、あちら、そちら 4. ～である［する］（ところの）",
+    "word": "that",
+    "meaningJa": "あれ、それ 2. あの［その］こと 3. あの［その］人、あちら、そちら 4. ～である［する］（ところの）",
+    "phonetic": "/ðæt/",
+    "example": "At school, I'm really glad to hear that.",
+    "exampleJa": "学校で、私はそれを聞いてとてもうれしく思います。",
+    "acceptableAnswers": [
+      "that"
+    ],
+    "choicesJa": [
+      "あれ、それ 2. あの［その］こと 3. あの［その］人、あちら、そちら 4. ～である［する］（ところの）",
+      "垣根",
+      "地面、大地",
+      "皮膚、肌"
+    ],
+    "choicesEn": [
+      "more",
+      "that",
+      "hardship",
+      "act"
+    ]
+  },
+  {
+    "id": "je1800_0025",
+    "number": 25,
+    "english": "these",
+    "japanese": "これらが［は］",
+    "word": "these",
+    "meaningJa": "これらが［は］",
+    "phonetic": "/ðiːz/",
+    "example": "After school, Whose notebooks are these?",
+    "exampleJa": "放課後、これらは誰の本ですか。",
+    "acceptableAnswers": [
+      "these"
+    ],
+    "choicesJa": [
+      "週末",
+      "（重大なできごとが起こった）場所、遺跡",
+      "これらが［は］",
+      "カード、はがき、トランプの札  トランプをする"
+    ],
+    "choicesEn": [
+      "fail",
+      "traffic",
+      "theme",
+      "these"
+    ]
+  },
+  {
+    "id": "je1800_0026",
+    "number": 26,
+    "english": "those",
+    "japanese": "あれら、それら",
+    "word": "those",
+    "meaningJa": "あれら、それら",
+    "phonetic": "/ðoʊz/",
+    "example": "This morning, Look at those boys in the park.",
+    "exampleJa": "今朝、公園にいるあれらの少年たちを見て下さい。",
+    "acceptableAnswers": [
+      "those"
+    ],
+    "choicesJa": [
+      "あれら、それら",
+      "安全な",
+      "努力",
+      "表現、言い回し、（顔などの）表情"
+    ],
+    "choicesEn": [
+      "room",
+      "possible",
+      "come from",
+      "those"
+    ]
+  },
+  {
+    "id": "je1800_0027",
+    "number": 27,
+    "english": "a",
+    "japanese": "～というもの 2. ～につき 3. 1 つの、1 人の",
+    "word": "a",
+    "meaningJa": "～というもの 2. ～につき 3. 1 つの、1 人の",
+    "phonetic": "/ə/",
+    "example": "I have a pen.",
+    "exampleJa": "私はペンを1本持っています。",
+    "acceptableAnswers": [
+      "a"
+    ],
+    "choicesJa": [
+      "光、光線 2. 明かり、電灯",
+      "銀行",
+      "これい",
+      "～というもの 2. ～につき 3. 1 つの、1 人の"
+    ],
+    "choicesEn": [
+      "surprised",
+      "his",
+      "a",
+      "wonder"
+    ]
+  },
+  {
+    "id": "je1800_0028",
+    "number": 28,
+    "english": "an",
+    "japanese": "1つの、1人の",
+    "word": "an",
+    "meaningJa": "1つの、1人の",
+    "phonetic": "/æn/",
+    "example": "She ate an apple.",
+    "exampleJa": "彼女はリンゴを1個食べました。",
+    "acceptableAnswers": [
+      "an"
+    ],
+    "choicesJa": [
+      "今",
+      "1つの、1人の",
+      "～に興味がある",
+      "～しようとする"
+    ],
+    "choicesEn": [
+      "an",
+      "relax",
+      "eat",
+      "cute"
+    ]
+  },
+  {
+    "id": "je1800_0029",
+    "number": 29,
+    "english": "the",
+    "japanese": "2.  3.  4.",
+    "word": "the",
+    "meaningJa": "2.  3.  4.",
+    "phonetic": "/ðə/",
+    "example": "The book is on the desk.",
+    "exampleJa": "その本は机の上にあります。",
+    "acceptableAnswers": [
+      "the"
+    ],
+    "choicesJa": [
+      "～を与える、贈る ＡにＢを与える 2. 開く、もよおす、演ずる、行う",
+      "今夜（は）",
+      "落胆した、元気をなくした",
+      "2.  3.  4."
+    ],
+    "choicesEn": [
+      "the",
+      "scared",
+      "high",
+      "rich"
+    ]
+  },
+  {
+    "id": "je1800_0030",
+    "number": 30,
+    "english": "who",
+    "japanese": "だれ 2.～である",
+    "word": "who",
+    "meaningJa": "だれ 2.～である",
+    "phonetic": "/huː/",
+    "example": "In class, who cooked dinner yesterday?",
+    "exampleJa": "授業で、昨日だれが夕食つくったのですか。",
+    "acceptableAnswers": [
+      "who"
+    ],
+    "choicesJa": [
+      "階段",
+      "10年間",
+      "だれ 2.～である",
+      "コンテスト、コンクール"
+    ],
+    "choicesEn": [
+      "any",
+      "who",
+      "mix",
+      "poem"
+    ]
+  }
+]

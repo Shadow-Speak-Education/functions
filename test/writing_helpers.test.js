@@ -6,6 +6,7 @@ const {
   buildCorrectionPayload,
   buildOcrPayload,
   correctWritingHandler,
+  describeEmptyOpenAiResponse,
   extractWritingTextFromImageHandler,
   validateCorrectWritingInput,
   validateOcrInput,
@@ -115,6 +116,8 @@ async function test(name, fn) {
     assert.strictEqual(payload.model, "gpt-5.6-luna");
     assert.strictEqual(payload.response_format.type, "json_schema");
     assert.strictEqual(payload.response_format.json_schema.strict, true);
+    assert.strictEqual(payload.reasoning_effort, "low");
+    assert(payload.max_completion_tokens >= 4000);
     assert(payload.response_format.json_schema.schema.required.includes("improvedText"));
     assert(payload.response_format.json_schema.schema.required.includes("improvements"));
     assert(payload.messages[0].content.includes("correctedText"));
@@ -128,7 +131,18 @@ async function test(name, fn) {
     });
     assert.strictEqual(payload.response_format.type, "json_schema");
     assert.strictEqual(payload.response_format.json_schema.strict, true);
+    assert.strictEqual(payload.reasoning_effort, "low");
+    assert(payload.max_completion_tokens >= 2000);
     assert(payload.messages[1].content.some((part) => part.type === "image_url"));
+    const imagePart = payload.messages[1].content.find(
+      (part) => part.type === "image_url"
+    );
+    assert.strictEqual(imagePart.image_url.detail, "high");
+    assert(payload.messages[0].content.includes("character-faithful"));
+    assert(payload.messages[0].content.includes("Prefer [不明]"));
+    assert(payload.messages[0].content.includes("including misspellings"));
+    assert(!payload.messages[0].content.includes("transcribe the best guess"));
+    assert(!payload.messages[0].content.includes("read the English as naturally"));
     assert(!JSON.stringify(payload.messages[0]).includes("correctedText"));
   });
 
@@ -137,6 +151,31 @@ async function test(name, fn) {
       () => validateOcrInput({ imageBase64: "aGVsbG8=", mimeType: "image/gif" }),
       /画像形式/
     );
+  });
+
+  await test("records diagnostics when OpenAI returns no content", () => {
+    const details = describeEmptyOpenAiResponse({
+      id: "chatcmpl_test",
+      model: "gpt-test",
+      choices: [{
+        finish_reason: "length",
+        message: { content: "", refusal: null },
+      }],
+      usage: {
+        prompt_tokens: 42,
+        completion_tokens: 500,
+        completion_tokens_details: { reasoning_tokens: 500 },
+      },
+    });
+    assert.deepStrictEqual(details, {
+      responseId: "chatcmpl_test",
+      model: "gpt-test",
+      finishReason: "length",
+      refusal: null,
+      promptTokens: 42,
+      completionTokens: 500,
+      reasoningTokens: 500,
+    });
   });
 
   await test("ocr returns transcribed text with mocked OpenAI", async () => {
@@ -172,6 +211,51 @@ async function test(name, fn) {
     assert.strictEqual(result.uncertainParts.length, 1);
     assert.strictEqual(result.usage.model, "gpt-5.6-luna");
     assert.strictEqual(calls, 1);
+  });
+
+  await test("ocr preserves grammar and word-choice errors verbatim", async () => {
+    const verbatimText = [
+      "I'm trying to write more deeply to recognize my writing.",
+      "I'm also like to make apps to improve my English skills.",
+      "I hope this writing can read by AI",
+    ].join("\n");
+
+    const result = await extractWritingTextFromImageHandler({
+      data: {
+        imageBase64: "aGVsbG8=",
+        mimeType: "image/jpeg",
+      },
+      apiKey: "test-key",
+      fetchImpl: async (_url, options) => {
+        const payload = JSON.parse(options.body);
+        const instructions = payload.messages[0].content;
+        assert(instructions.includes(
+          "I'm also like to make apps to improve my English skills."
+        ));
+        assert(instructions.includes("I hope this writing can read by AI"));
+        assert(instructions.includes("never output \"I also like to use apps\""));
+        assert(instructions.includes("never output \"can be read by AI\""));
+        assert(instructions.includes("or \"can lead by AI\""));
+
+        return makeFetchResponse({
+          body: openAiBody({
+            transcribedText: verbatimText,
+            uncertainParts: [],
+            hasUnreadableText: false,
+            warningJa: null,
+          }),
+        });
+      },
+    });
+
+    assert.strictEqual(result.transcribedText, verbatimText);
+    assert(result.transcribedText.includes(
+      "I'm also like to make apps to improve my English skills."
+    ));
+    assert(result.transcribedText.includes("I hope this writing can read by AI"));
+    assert(!result.transcribedText.includes("I also like to use apps"));
+    assert(!result.transcribedText.includes("can be read by AI"));
+    assert(!result.transcribedText.includes("can lead by AI"));
   });
 
   await test("returns normal schema with mocked OpenAI", async () => {
