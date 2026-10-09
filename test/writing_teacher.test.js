@@ -3,6 +3,7 @@
 const assert = require("assert");
 const {
   authenticateWritingTeacher,
+  acceptCopyrightGuidanceForTeacher,
   createWritingPerformanceTestForTeacher,
   copyWritingPerformanceTestForTeacher,
   deleteWritingPerformanceTestForTeacher,
@@ -121,6 +122,24 @@ async function test(name, fn) {
     assert.strictEqual(result.writingEnabled, true);
   });
 
+  await test("teacher accepts versioned copyright guidance once per policy", async () => {
+    const db = fixture();
+    db.docs.set("teacherSessions/auth-a", teacherSession());
+    const accepted = await acceptCopyrightGuidanceForTeacher({
+      db,
+      authUid: "auth-a",
+    });
+    const stored = db.docs.get("schools/school-a/teachers/teacher-a");
+    assert.strictEqual(accepted.copyrightGuidanceVersion, "2026-10-09");
+    assert.strictEqual(stored.copyrightGuidanceVersion, "2026-10-09");
+    assert.ok(Number.isFinite(stored.copyrightGuidanceAcceptedAtMillis));
+    const profile = await getTeacherProfileForTeacher({
+      db,
+      authUid: "auth-a",
+    });
+    assert.strictEqual(profile.copyrightGuidanceVersion, "2026-10-09");
+  });
+
   await test("same-school teacher creates and publishes a test", async () => {
     const db = fixture();
     await authenticateWritingTeacher({ db, authUid: "auth-a", data: { schoolCode: "SCHOOL-A", teacherId: "teacher-a", password: "secret" } });
@@ -236,7 +255,35 @@ async function test(name, fn) {
     const db = fixture();
     db.docs.set("teacherSessions/auth-a", teacherSession());
     db.docs.set("schools/school-a/classes/class-a/writingPerformanceTests/test-a", testData);
-    db.docs.set("schools/school-a/classes/class-a/writingPerformanceTests/test-a/submissions/student-a", { submittedText: "I write.", wordCount: 2, scoringStatus: "completed", aiTotalScore: 15 });
+    db.docs.set("schools/school-a/classes/class-a/writingPerformanceTests/test-a/submissions/student-a", {
+      submittedText: "I write.",
+      wordCount: 2,
+      scoringStatus: "completed",
+      aiTotalScore: 15,
+      speakingChallenge: {
+        sourceType: "writingPerformance",
+        referenceScript: "I write.",
+        completed: true,
+        relearningCompleted: true,
+        attemptCount: 2,
+        schemaVersion: 2,
+        latest: {
+          recognizedText: "I",
+          accuracy: 50,
+          wpm: 30,
+          durationMs: 2000,
+          performedAtMillis: 2000,
+        },
+        best: {
+          recognizedText: "I write",
+          accuracy: 100,
+          wpm: 60,
+          durationMs: 2000,
+          performedAtMillis: 1000,
+        },
+        updatedAtMillis: 2000,
+      },
+    });
     const result = await listWritingPerformanceSubmissionsForTeacher({ db, authUid: "auth-a", data: { classId: "class-a", testId: "test-a" } });
     assert.strictEqual(result.rows.length, 1);
     assert.strictEqual(result.rows[0].submitted, true);
@@ -244,6 +291,11 @@ async function test(name, fn) {
     assert.strictEqual(result.rows[0].grade, "1");
     assert.strictEqual(result.rows[0].class, "2");
     assert.strictEqual(result.rows[0].number, "1");
+    assert.strictEqual(result.rows[0].speakingChallenge.accuracy, 50);
+    assert.strictEqual(result.rows[0].speakingChallenge.recognizedText, "I");
+    assert.strictEqual(result.rows[0].speakingChallenge.best.accuracy, 100);
+    assert.strictEqual(result.rows[0].speakingChallenge.best.wpm, 60);
+    assert.strictEqual(result.rows[0].speakingChallenge.best.recognizedText, "I write");
   });
 
   await test("submission list uses current grade class and number instead of stale internal IDs", async () => {
@@ -391,6 +443,24 @@ async function test(name, fn) {
       data: { classId: "class-a", testId: "test-a", studentId: "student-a", finalScore: 6 },
     });
     assert.strictEqual(adjusted.evaluationMethod, "teacher_adjusted");
+
+    const reloadedList = await listWritingPerformanceSubmissionsForTeacher({
+      db,
+      authUid: "auth-a",
+      data: { classId: "class-a", testId: "test-a" },
+    });
+    assert.strictEqual(reloadedList.rows[0].teacherTotalScore, 6);
+    assert.strictEqual(reloadedList.rows[0].evaluationMethod, "teacher_adjusted");
+    assert.strictEqual(reloadedList.rows[0].aiTotalScore, 7);
+
+    const reloadedDetail = await getWritingPerformanceSubmissionForTeacher({
+      db,
+      authUid: "auth-a",
+      data: { classId: "class-a", testId: "test-a", studentId: "student-a" },
+    });
+    assert.strictEqual(reloadedDetail.submission.teacherTotalScore, 6);
+    assert.strictEqual(reloadedDetail.submission.evaluationMethod, "teacher_adjusted");
+    assert.strictEqual(reloadedDetail.submission.aiTotalScore, 7);
   });
 
   await test("quick final score rejects out-of-range values", async () => {

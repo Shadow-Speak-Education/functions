@@ -34,6 +34,7 @@ const {
 const {
   listWritingPerformanceTests,
   listWritingPerformanceTestsForPreview,
+  saveWritingPerformanceSpeakingChallenge,
   submitWritingPerformanceTest,
 } = require("./writing_performance");
 const {
@@ -41,6 +42,7 @@ const {
   refreshWritingTeacherSession,
   resolveWritingTeacherSession,
   getTeacherProfileForTeacher,
+  acceptCopyrightGuidanceForTeacher,
   createWritingPerformanceTestForTeacher,
   copyWritingPerformanceTestForTeacher,
   listWritingPerformanceTestsForTeacher,
@@ -546,6 +548,30 @@ exports.submitWritingPerformanceTest = onCall(
   }
 );
 
+exports.saveWritingPerformanceSpeakingChallenge = onCall(
+  { region: "asia-northeast1", timeoutSeconds: 30, memory: "256MiB" },
+  async (req) => {
+    if (!req.auth?.uid) throw new HttpsError("unauthenticated", "ログインが必要です。");
+    try {
+      await assertWritingEnabledForAuth({ db, authUid: req.auth.uid });
+      return await saveWritingPerformanceSpeakingChallenge({
+        db,
+        authUid: req.auth.uid,
+        data: req.data,
+      });
+    } catch (error) {
+      if (error instanceof WritingAccessError) throw toHttpsError(error);
+      if (error instanceof WritingFunctionError) {
+        throw new HttpsError(error.code, error.message);
+      }
+      console.error("🚨 saveWritingPerformanceSpeakingChallenge failed", {
+        message: error?.message || String(error),
+      });
+      throw new HttpsError("internal", "Speaking Challengeの保存に失敗しました。");
+    }
+  }
+);
+
 function teacherWritingCallable(handler, failureMessage) {
   return onCall(
     { region: "asia-northeast1", timeoutSeconds: 30, memory: "256MiB" },
@@ -603,6 +629,10 @@ exports.createStudentAppPreviewToken = teacherWritingCallable(
 exports.getTeacherProfile = teacherWritingCallable(
   getTeacherProfileForTeacher,
   "教師プロフィールの取得に失敗しました。"
+);
+exports.acceptCopyrightGuidanceForTeacher = teacherWritingCallable(
+  acceptCopyrightGuidanceForTeacher,
+  "教材利用確認の保存に失敗しました。"
 );
 exports.createWritingPerformanceTestForTeacher = teacherWritingCallable(
   createWritingPerformanceTestForTeacher,

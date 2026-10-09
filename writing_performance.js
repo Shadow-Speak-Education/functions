@@ -129,6 +129,9 @@ function performanceScoreSchema(test) {
       ...RUBRIC_KEYS,
       "overallFeedbackJa",
       "minimalCorrectedText",
+      "corrections",
+      "practiceCorrections",
+      "rewriteSegments",
       "deductions",
       "strengths",
       "suggestions",
@@ -139,8 +142,62 @@ function performanceScoreSchema(test) {
       ...properties,
       overallFeedbackJa: { type: "string" },
       minimalCorrectedText: { type: "string" },
+      corrections: {
+        type: "array",
+        maxItems: 20,
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["original", "corrected", "type", "reasonJa"],
+          properties: {
+            original: { type: "string" },
+            corrected: { type: "string" },
+            type: { type: "string", enum: ["grammar", "spelling"] },
+            reasonJa: { type: "string" },
+          },
+        },
+      },
+      practiceCorrections: {
+        type: "array",
+        maxItems: 5,
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: [
+            "type",
+            "original",
+            "corrected",
+            "reasonJa",
+            "contextBefore",
+            "contextAfter",
+          ],
+          properties: {
+            type: { type: "string", enum: ["replace", "insert", "delete"] },
+            original: { type: "string" },
+            corrected: { type: "string" },
+            reasonJa: { type: "string" },
+            contextBefore: { type: "string" },
+            contextAfter: { type: "string" },
+          },
+        },
+      },
+      rewriteSegments: {
+        type: "array",
+        maxItems: 5,
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["original", "corrected", "reasonJa"],
+          properties: {
+            original: { type: "string" },
+            corrected: { type: "string" },
+            reasonJa: { type: "string" },
+          },
+        },
+      },
       deductions: {
         type: "array",
+        maxItems: 5,
         items: {
           type: "object",
           additionalProperties: false,
@@ -168,6 +225,7 @@ function performanceScoreSchema(test) {
       },
       strengths: {
         type: "array",
+        maxItems: 3,
         items: {
           type: "object",
           additionalProperties: false,
@@ -180,6 +238,7 @@ function performanceScoreSchema(test) {
       },
       suggestions: {
         type: "array",
+        maxItems: 2,
         items: {
           type: "object",
           additionalProperties: false,
@@ -232,12 +291,23 @@ function buildPerformanceScoringPayload({ test, submittedText, wordCount }) {
           "deductions must contain only concrete reasons that actually lowered a rubric score: clear grammar or usage errors, spelling errors, unmet assignment requirements, missing required grammar, off-topic content, or a concrete organization problem under the rubric.",
           "Never deduct merely because a grammatically acceptable sentence could sound more natural, polished, native-like, detailed, or sophisticated. Put such optional improvements only in suggestions and keep scoreImpact false.",
           "For every deduction, identify its rubric criterion and pointsLost. The pointsLost totals per criterion must equal that criterion's maxScore minus score. Do not create a deduction for a criterion receiving full points.",
-          "Keep deductions concise and normally use no more than 3 entries by combining closely related errors. Use an empty errorPart and correction when the deduction is about content, organization, or requirements rather than a local text correction.",
+          "Before returning JSON, verify each criterion independently: add its deductions.pointsLost values and make that integer total exactly equal maxScore minus score. Keep the rubric score as the assessment result; deductions only explain that score and must never be used to recalculate or replace it.",
+          "Keep deductions concise and return no more than 5 entries by combining closely related errors. Deductions explain the rubric scores; they never determine or recalculate them. Use an empty errorPart and correction when the deduction is about content, organization, or requirements rather than a local text correction.",
           "Return 1 to 3 concrete rubric-based strengths and no more than 2 optional suggestions. Keep every explanation to one or two short Japanese sentences. Do not generate a full rewritten essay.",
           "For minimalCorrectedText, preserve the student's ideas, vocabulary choices, sentence order, tone, and level.",
           "Correct only clear spelling, capitalization, punctuation, article, preposition, subject-verb agreement, verb form or tense, singular/plural, and other basic grammar errors.",
           "Do not improve style, naturalness, detail, organization, or expression. Do not replace a grammatically acceptable expression with a more polished one.",
           "When a possible change is uncertain, keep the student's original wording. If no clear correction is needed, return submittedText unchanged.",
+          "corrections is the source of truth for the red correction display. Include only objectively necessary grammar or spelling corrections represented in minimalCorrectedText.",
+          "Do not include style, naturalness, expression preference, content, organization, word-count requirements, optional rewrites, capitalization-only, or punctuation-only changes in corrections.",
+          "Each corrections.original must be the exact local text from submittedText and corrections.corrected must be the exact replacement text present in minimalCorrectedText. Use grammar for article, preposition, agreement, word order, verb form/tense, number, and other grammar; use spelling only for misspelled words.",
+          "If there are no objective grammar or spelling corrections, return an empty corrections array.",
+          "practiceCorrections and rewriteSegments are for short relearning, not for scoring. Select at most 5 entries total, prioritizing basic grammar, spelling, a missing word, and an obviously extra word.",
+          "Use practiceCorrections.type replace for a local replacement, insert for a missing word or short phrase, and delete for an obviously extra word. Never include optional style improvements.",
+          "For replace and delete, original must be the exact local text in submittedText. For replace and insert, corrected must be the exact answer in minimalCorrectedText. Use an empty original only for insert and an empty corrected only for delete.",
+          "For every practice correction, contextBefore and contextAfter must be short exact adjacent text copied from submittedText so the location can be found. Either context may be empty only at the beginning or end of the submission.",
+          "Use rewriteSegments only when a sentence or segment is too broken for a short local replace, insert, or delete. Show the student's exact segment and its minimally corrected form; do not turn it into a full-input exercise.",
+          "If submittedText and minimalCorrectedText differ, return at least one practiceCorrection or rewriteSegment whenever possible. If no safe local target can be identified, return one rewriteSegment covering the smallest useful segment.",
           "Return exactly the requested JSON object in Japanese feedback.",
         ].join("\n"),
       },
@@ -259,17 +329,19 @@ function buildPerformanceScoringPayload({ test, submittedText, wordCount }) {
   };
 }
 
-function validatePerformanceScore(value, test) {
+function validatePerformanceScore(value, test, submittedText = "") {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new WritingFunctionError("internal", "AI一次評価の形式が不正です。");
   }
+  const validationWarnings = [];
   const scores = {};
   let total = 0;
   for (const key of RUBRIC_KEYS) {
     const item = value[key];
     const maxScore = test.rubric[key].maxScore;
-    const score = Number(item && item.score);
-    if (!Number.isInteger(score) || score < 0 || score > maxScore) {
+    const score = item && item.score;
+    if (typeof score !== "number" || !Number.isInteger(score) ||
+        score < 0 || score > maxScore) {
       throw new WritingFunctionError(
         "internal",
         `${RUBRIC_LABELS[key]}のAI点が配点範囲外です。`
@@ -278,23 +350,73 @@ function validatePerformanceScore(value, test) {
     scores[key] = {
       score,
       maxScore,
-      commentJa: String((item && item.commentJa) || "").trim(),
+      commentJa: typeof item.commentJa === "string" ? item.commentJa.trim() : "",
     };
     total += score;
+  }
+  const rubricTotal = RUBRIC_KEYS.reduce(
+    (sum, key) => sum + test.rubric[key].maxScore,
+    0
+  );
+  if (!Number.isInteger(total) || total < 0 || total > rubricTotal ||
+      rubricTotal !== test.totalPoints) {
+    throw new WritingFunctionError("internal", "AI一次評価の合計点が不正です。");
+  }
+  if (typeof value.minimalCorrectedText !== "string") {
+    throw new WritingFunctionError("internal", "最小訂正文の形式が不正です。");
   }
   const minimalCorrectedText = normalizeWritingText(value.minimalCorrectedText);
   if (!minimalCorrectedText || minimalCorrectedText.length > 5000) {
     throw new WritingFunctionError("internal", "最小訂正文の形式が不正です。");
   }
-  const deductions = validateDeductions(value.deductions, test, scores);
-  const strengths = validateStrengths(value.strengths);
-  const suggestions = validateSuggestions(value.suggestions);
+  const deductionValidation = validateDeductions(
+    value.deductions,
+    test,
+    scores,
+    validationWarnings
+  );
+  const deductions = deductionValidation.deductions;
+  const corrections = validateCorrections(
+    value.corrections,
+    deductions,
+    validationWarnings
+  );
+  const practiceCorrections = validatePracticeCorrections(
+    value.practiceCorrections,
+    corrections,
+    validationWarnings
+  );
+  let rewriteSegments = validateRewriteSegments(
+    value.rewriteSegments,
+    validationWarnings,
+    Math.max(0, 5 - practiceCorrections.length)
+  );
+  const normalizedSubmittedText = normalizeWritingText(submittedText);
+  const fullTextReviewRequired = Boolean(normalizedSubmittedText &&
+      normalizeComparableWriting(normalizedSubmittedText) !==
+        normalizeComparableWriting(minimalCorrectedText) &&
+      practiceCorrections.length === 0 && rewriteSegments.length === 0);
+  if (fullTextReviewRequired) {
+    rewriteSegments = [{
+      original: normalizedSubmittedText,
+      corrected: minimalCorrectedText,
+      reasonJa: "修正版の全文を確認しましょう。",
+    }];
+  }
+  const strengths = validateStrengths(value.strengths, validationWarnings);
+  const suggestions = validateSuggestions(value.suggestions, validationWarnings);
   return {
     aiScores: scores,
     aiTotalScore: total,
     aiFeedback: String(value.overallFeedbackJa || "").trim(),
     minimalCorrectedText,
+    corrections,
+    practiceCorrections,
+    rewriteSegments,
+    fullTextReviewRequired,
     deductions,
+    deductionMismatch: deductionValidation.mismatch,
+    validationWarnings,
     strengths,
     suggestions,
     needsTeacherReview: value.needsTeacherReview === true,
@@ -303,6 +425,183 @@ function validatePerformanceScore(value, test) {
         ? value.reviewReasonJa.trim()
         : null,
   };
+}
+
+function normalizeComparableWriting(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function pushValidationWarning(warnings, code) {
+  if (Array.isArray(warnings) && !warnings.includes(code)) warnings.push(code);
+}
+
+function softDetailText(value, maxLength, required = false) {
+  if (typeof value !== "string") return null;
+  const text = value.trim();
+  if ((required && !text) || text.length > maxLength) return null;
+  return text;
+}
+
+function legacyPracticeCorrections(legacyCorrections) {
+  return legacyCorrections.slice(0, 5).map((item) => ({
+    type: "replace",
+    original: item.original,
+    corrected: item.corrected,
+    reasonJa: item.reasonJa,
+    contextBefore: "",
+    contextAfter: "",
+  }));
+}
+
+function validatePracticeCorrections(
+  value,
+  legacyCorrections = [],
+  warnings = []
+) {
+  if (value == null) {
+    return legacyPracticeCorrections(legacyCorrections);
+  }
+  if (!Array.isArray(value)) {
+    pushValidationWarning(warnings, "practice_corrections_not_array");
+    return legacyPracticeCorrections(legacyCorrections);
+  }
+  const seen = new Set();
+  const valid = [];
+  for (const item of value) {
+    const type = String(item && item.type || "").trim();
+    if (!["replace", "insert", "delete"].includes(type)) {
+      pushValidationWarning(warnings, "practice_correction_invalid_item");
+      continue;
+    }
+    const original = softDetailText(item && item.original, 200);
+    const corrected = softDetailText(item && item.corrected, 200);
+    const reasonJa = softDetailText(item && item.reasonJa, 300, true);
+    const contextBefore = softDetailText(item && item.contextBefore, 200);
+    const contextAfter = softDetailText(item && item.contextAfter, 200);
+    if (original == null || corrected == null || reasonJa == null ||
+        contextBefore == null || contextAfter == null) {
+      pushValidationWarning(warnings, "practice_correction_invalid_item");
+      continue;
+    }
+    if ((type === "insert" && (original || !corrected)) ||
+        (type === "delete" && (!original || corrected)) ||
+        (type === "replace" && (!original || !corrected))) {
+      pushValidationWarning(warnings, "practice_correction_invalid_item");
+      continue;
+    }
+    const correction = {
+      type,
+      original,
+      corrected,
+      reasonJa,
+      contextBefore,
+      contextAfter,
+    };
+    const key = `${type}\u0000${original}\u0000${corrected}\u0000${correction.contextBefore}\u0000${correction.contextAfter}`;
+    if (seen.has(key)) {
+      pushValidationWarning(warnings, "practice_correction_duplicate_discarded");
+      continue;
+    }
+    seen.add(key);
+    if (valid.length < 5) valid.push(correction);
+    else pushValidationWarning(warnings, "practice_corrections_truncated");
+  }
+  return valid;
+}
+
+function validateRewriteSegments(value, warnings = [], limit = 5) {
+  if (value == null) return [];
+  if (!Array.isArray(value)) {
+    pushValidationWarning(warnings, "rewrite_segments_not_array");
+    return [];
+  }
+  const seen = new Set();
+  const valid = [];
+  for (const item of value) {
+    const original = softDetailText(item && item.original, 1000, true);
+    const corrected = softDetailText(item && item.corrected, 1000, true);
+    const reasonJa = softDetailText(item && item.reasonJa, 300, true);
+    if (original == null || corrected == null || reasonJa == null) {
+      pushValidationWarning(warnings, "rewrite_segment_invalid_item");
+      continue;
+    }
+    const key = `${original}\u0000${corrected}`;
+    if (seen.has(key)) {
+      pushValidationWarning(warnings, "rewrite_segment_duplicate_discarded");
+      continue;
+    }
+    seen.add(key);
+    if (valid.length < limit) valid.push({ original, corrected, reasonJa });
+    else pushValidationWarning(warnings, "relearning_targets_truncated");
+  }
+  return valid;
+}
+
+function fallbackCorrectionsFromDeductions(deductions) {
+  return deductions
+    .filter((item) =>
+      item.criterion === "accuracy" &&
+      String(item.errorPart || "").trim() &&
+      String(item.correction || "").trim()
+    )
+    .slice(0, 20)
+    .map((item) => ({
+      original: String(item.errorPart).trim(),
+      corrected: String(item.correction).trim(),
+      type: /spelling|spell|スペル|綴り/i.test(String(item.reasonJa || ""))
+        ? "spelling"
+        : "grammar",
+      reasonJa: String(item.reasonJa || "").trim(),
+    }));
+}
+
+function validateCorrections(value, deductions = [], warnings = []) {
+  // Old stored responses and local fixtures do not have this field. A
+  // conservative accuracy-only fallback keeps them readable without a data
+  // migration, while every newly scored response is required by the strict
+  // schema above to provide the structured field.
+  if (value == null) {
+    return fallbackCorrectionsFromDeductions(deductions);
+  }
+  if (!Array.isArray(value)) {
+    pushValidationWarning(warnings, "corrections_not_array");
+    return fallbackCorrectionsFromDeductions(deductions);
+  }
+  const seen = new Set();
+  const valid = [];
+  for (const item of value) {
+    const type = String(item && item.type || "").trim();
+    if (type !== "grammar" && type !== "spelling") {
+      pushValidationWarning(warnings, "correction_invalid_item");
+      continue;
+    }
+    const original = softDetailText(item && item.original, 200, true);
+    const corrected = softDetailText(item && item.corrected, 200, true);
+    const reasonJa = softDetailText(item && item.reasonJa, 300, true);
+    if (original == null || corrected == null || reasonJa == null) {
+      pushValidationWarning(warnings, "correction_invalid_item");
+      continue;
+    }
+    const correction = {
+      original,
+      corrected,
+      type,
+      reasonJa,
+    };
+    const key = `${correction.type}\u0000${correction.original}\u0000${correction.corrected}`;
+    if (seen.has(key)) {
+      pushValidationWarning(warnings, "correction_duplicate_discarded");
+      continue;
+    }
+    seen.add(key);
+    if (valid.length < 20) valid.push(correction);
+    else pushValidationWarning(warnings, "corrections_truncated");
+  }
+  return valid.length > 0 ? valid : fallbackCorrectionsFromDeductions(deductions);
 }
 
 function requiredDetailText(value, label, maxLength) {
@@ -329,62 +628,99 @@ function validateCriterion(value) {
   return criterion;
 }
 
-function validateDeductions(value, test, scores) {
-  if (!Array.isArray(value) || value.length > 5) {
-    throw new WritingFunctionError("internal", "減点理由の形式が不正です。");
-  }
+function validateDeductions(value, test, scores, warnings = []) {
   const lostByCriterion = Object.fromEntries(RUBRIC_KEYS.map((key) => [key, 0]));
-  const deductions = value.map((item) => {
-    const criterion = validateCriterion(item && item.criterion);
-    const pointsLost = Number(item && item.pointsLost);
-    const scoreGap = test.rubric[criterion].maxScore - scores[criterion].score;
-    if (!Number.isInteger(pointsLost) || pointsLost < 1 || pointsLost > scoreGap) {
-      throw new WritingFunctionError("internal", "減点理由とAI点に矛盾があります。");
+  let mismatch = false;
+  if (!Array.isArray(value)) {
+    pushValidationWarning(warnings, "deductions_not_array");
+    return { deductions: [], mismatch: true };
+  }
+  const deductions = [];
+  for (const item of value) {
+    const criterion = String(item && item.criterion || "").trim();
+    const pointsLost = item && item.pointsLost;
+    const quote = softDetailText(item && item.quote, 500);
+    const errorPart = softDetailText(item && item.errorPart, 200);
+    const correction = softDetailText(item && item.correction, 200);
+    const reasonJa = softDetailText(item && item.reasonJa, 300, true);
+    if (!RUBRIC_KEYS.includes(criterion) ||
+        typeof pointsLost !== "number" || !Number.isInteger(pointsLost) ||
+        pointsLost < 1 || pointsLost > test.totalPoints || quote == null ||
+        errorPart == null || correction == null || reasonJa == null) {
+      pushValidationWarning(warnings, "deduction_invalid_item");
+      mismatch = true;
+      continue;
     }
+    const scoreGap = test.rubric[criterion].maxScore - scores[criterion].score;
+    if (pointsLost > scoreGap) mismatch = true;
     lostByCriterion[criterion] += pointsLost;
-    return {
+    const deduction = {
       criterion,
-      quote: optionalDetailText(item.quote, 500),
-      errorPart: optionalDetailText(item.errorPart, 200),
-      correction: optionalDetailText(item.correction, 200),
-      reasonJa: requiredDetailText(item.reasonJa, "減点理由", 300),
+      quote,
+      errorPart,
+      correction,
+      reasonJa,
       pointsLost,
     };
-  });
+    if (deductions.length < 5) deductions.push(deduction);
+    else pushValidationWarning(warnings, "deductions_truncated");
+  }
   for (const key of RUBRIC_KEYS) {
     const expected = test.rubric[key].maxScore - scores[key].score;
     if (lostByCriterion[key] !== expected) {
-      throw new WritingFunctionError("internal", "減点理由の合計とAI点に矛盾があります。");
+      mismatch = true;
     }
   }
-  return deductions;
+  return { deductions, mismatch };
 }
 
-function validateStrengths(value) {
-  if (!Array.isArray(value) || value.length > 3) {
-    throw new WritingFunctionError("internal", "よかった点の形式が不正です。");
+function validateStrengths(value, warnings = []) {
+  if (!Array.isArray(value)) {
+    pushValidationWarning(warnings, "strengths_not_array");
+    return [];
   }
-  return value.map((item) => ({
-    criterion: validateCriterion(item && item.criterion),
-    textJa: requiredDetailText(item && item.textJa, "よかった点", 300),
-  }));
+  const valid = [];
+  for (const item of value) {
+    const criterion = String(item && item.criterion || "").trim();
+    const textJa = softDetailText(item && item.textJa, 300, true);
+    if (!RUBRIC_KEYS.includes(criterion) || textJa == null) {
+      pushValidationWarning(warnings, "strength_invalid_item");
+      continue;
+    }
+    if (valid.length < 3) valid.push({ criterion, textJa });
+    else pushValidationWarning(warnings, "strengths_truncated");
+  }
+  return valid;
 }
 
-function validateSuggestions(value) {
-  if (!Array.isArray(value) || value.length > 2) {
-    throw new WritingFunctionError("internal", "改善提案の形式が不正です。");
+function validateSuggestions(value, warnings = []) {
+  if (!Array.isArray(value)) {
+    pushValidationWarning(warnings, "suggestions_not_array");
+    return [];
   }
-  return value.map((item) => {
+  const valid = [];
+  for (const item of value) {
     if (!item || item.scoreImpact !== false) {
-      throw new WritingFunctionError("internal", "改善提案を減点理由として扱うことはできません。");
+      pushValidationWarning(warnings, "suggestion_invalid_item");
+      continue;
     }
-    return {
-      quote: requiredDetailText(item.quote, "改善前の表現", 500),
-      suggestion: requiredDetailText(item.suggestion, "改善提案", 500),
-      reasonJa: requiredDetailText(item.reasonJa, "改善提案の理由", 300),
+    const quote = softDetailText(item.quote, 500, true);
+    const suggestion = softDetailText(item.suggestion, 500, true);
+    const reasonJa = softDetailText(item.reasonJa, 300, true);
+    if (quote == null || suggestion == null || reasonJa == null) {
+      pushValidationWarning(warnings, "suggestion_invalid_item");
+      continue;
+    }
+    const normalized = {
+      quote,
+      suggestion,
+      reasonJa,
       scoreImpact: false,
     };
-  });
+    if (valid.length < 2) valid.push(normalized);
+    else pushValidationWarning(warnings, "suggestions_truncated");
+  }
+  return valid;
 }
 
 async function callPerformanceScoring({ test, submittedText, wordCount, apiKey, fetchImpl }) {
@@ -414,8 +750,15 @@ async function callPerformanceScoring({ test, submittedText, wordCount, apiKey, 
   } catch (_) {
     throw new WritingFunctionError("internal", "AI採点結果のJSONを解析できませんでした。");
   }
+  const validated = validatePerformanceScore(value, test, submittedText);
+  if (validated.deductionMismatch || validated.validationWarnings.length > 0) {
+    console.warn("Writing Performance auxiliary AI fields were normalized; rubric scores were kept as the source of truth.", {
+      deductionMismatch: validated.deductionMismatch,
+      validationWarnings: validated.validationWarnings,
+    });
+  }
   return {
-    ...validatePerformanceScore(value, test),
+    ...validated,
     aiModel: parsed.model || process.env.WRITING_PERFORMANCE_MODEL || WRITING_MODEL,
   };
 }
@@ -504,8 +847,19 @@ function publicTestData(doc, submission, evaluation) {
       aiTotalScore: showProvisional && Number.isFinite(submissionData.aiTotalScore)
         ? submissionData.aiTotalScore : null,
       aiFeedback: showProvisional ? String(submissionData.aiFeedback || "") : "",
-      minimalCorrectedText: showProvisional || showFinal
-        ? String(submissionData.minimalCorrectedText || "") : "",
+      // Relearning content is independent from score visibility. Hiding the
+      // provisional score must not make the corrected reading target vanish.
+      minimalCorrectedText: String(submissionData.minimalCorrectedText || ""),
+      corrections: Array.isArray(submissionData.corrections)
+        ? submissionData.corrections
+        : null,
+      practiceCorrections: Array.isArray(submissionData.practiceCorrections)
+        ? submissionData.practiceCorrections
+        : null,
+      rewriteSegments: Array.isArray(submissionData.rewriteSegments)
+        ? submissionData.rewriteSegments
+        : [],
+      fullTextReviewRequired: submissionData.fullTextReviewRequired === true,
       deductions: showAiEvaluationDetails && Array.isArray(submissionData.deductions)
         ? submissionData.deductions : [],
       strengths: showAiEvaluationDetails && Array.isArray(submissionData.strengths)
@@ -519,8 +873,92 @@ function publicTestData(doc, submission, evaluation) {
         ? String(evaluationData?.evaluationMethod || "") || null
         : null,
       teacherReviewed,
+      speakingChallenge: publicSpeakingChallenge(
+        submissionData.speakingChallenge
+      ),
     } : null,
   };
+}
+
+function publicSpeakingChallenge(raw) {
+  if (!raw || typeof raw !== "object" || raw.completed !== true) return null;
+  const sanitizeAttempt = (value) => {
+    if (!value || typeof value !== "object") return null;
+    return {
+      recognizedText: String(value.recognizedText || ""),
+      accuracy: Number.isFinite(value.accuracy) ? value.accuracy : 0,
+      wpm: Number.isFinite(value.wpm) ? value.wpm : 0,
+      durationMs: Number.isFinite(value.durationMs) ? value.durationMs : 0,
+      performedAtMillis: Number.isFinite(value.performedAtMillis)
+        ? value.performedAtMillis
+        : (Number.isFinite(value.updatedAtMillis) ? value.updatedAtMillis : null),
+    };
+  };
+  const legacy = sanitizeAttempt(raw);
+  const latest = sanitizeAttempt(raw.latest) || legacy;
+  const best = sanitizeAttempt(raw.best) || legacy;
+  if (!latest || !best) return null;
+  return {
+    sourceType: "writingPerformance",
+    referenceScript: String(raw.referenceScript || ""),
+    ...latest,
+    completed: true,
+    relearningCompleted: raw.relearningCompleted !== false,
+    attemptCount: Number.isInteger(raw.attemptCount) ? raw.attemptCount : 1,
+    completedAtMillis: Number.isFinite(raw.completedAtMillis)
+      ? raw.completedAtMillis
+      : null,
+    latest,
+    best,
+    schemaVersion: Number.isInteger(raw.schemaVersion) ? raw.schemaVersion : 1,
+    updatedAtMillis: Number.isFinite(raw.updatedAtMillis)
+      ? raw.updatedAtMillis
+      : latest.performedAtMillis,
+  };
+}
+
+function normalizeSpeakingWords(text) {
+  return String(text || "")
+    .toLowerCase()
+    // Apostrophes are not observable in speech. Treat "don't" and a speech
+    // recognizer's "dont" as the same spoken word.
+    .replace(/['\u2019]/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+}
+
+function wordEditDistance(reference, recognized) {
+  if (reference.length === 0) return recognized.length;
+  if (recognized.length === 0) return reference.length;
+  let previous = Array.from({ length: recognized.length + 1 }, (_, index) => index);
+  for (let i = 1; i <= reference.length; i += 1) {
+    const current = Array(recognized.length + 1).fill(0);
+    current[0] = i;
+    for (let j = 1; j <= recognized.length; j += 1) {
+      current[j] = Math.min(
+        previous[j - 1] + (reference[i - 1] === recognized[j - 1] ? 0 : 1),
+        previous[j] + 1,
+        current[j - 1] + 1
+      );
+    }
+    previous = current;
+  }
+  return previous[recognized.length];
+}
+
+function calculateSpeakingChallengeMetrics({ referenceScript, recognizedText, durationMs }) {
+  const reference = normalizeSpeakingWords(referenceScript);
+  const recognized = normalizeSpeakingWords(recognizedText);
+  const distance = wordEditDistance(reference, recognized);
+  const accuracy = reference.length === 0
+    ? 0
+    : Math.max(0, Math.min(100, Math.round((1 - distance / reference.length) * 100)));
+  const wpm = durationMs <= 0
+    ? 0
+    : Math.max(0, Math.min(1000, Math.round(recognized.length * 60000 / durationMs)));
+  return { accuracy, wpm, durationMs };
 }
 
 function rubricScoresMatch(aiScores, teacherScores) {
@@ -664,7 +1102,11 @@ async function submitWritingPerformanceTest({ db, admin, authUid, data, apiKey, 
       aiScores: showProvisional ? score.aiScores : null,
       aiTotalScore: showProvisional ? score.aiTotalScore : null,
       aiFeedback: showProvisional ? score.aiFeedback : "",
-      minimalCorrectedText: showProvisional ? score.minimalCorrectedText : "",
+      minimalCorrectedText: score.minimalCorrectedText,
+      corrections: score.corrections,
+      practiceCorrections: score.practiceCorrections,
+      rewriteSegments: score.rewriteSegments,
+      fullTextReviewRequired: score.fullTextReviewRequired,
       deductions: showProvisional ? score.deductions : [],
       strengths: showProvisional ? score.strengths : [],
       suggestions: showProvisional ? score.suggestions : [],
@@ -680,6 +1122,85 @@ async function submitWritingPerformanceTest({ db, admin, authUid, data, apiKey, 
   }
 }
 
+async function saveWritingPerformanceSpeakingChallenge({ db, authUid, data }) {
+  const session = await resolveWritingSession({ db, authUid });
+  const { classRef } = await assertStudentClass({
+    db,
+    session,
+    classId: data && data.classId,
+  });
+  const testId = cleanId(data && data.testId, "testId");
+  if (String(data && data.sourceType || "") !== "writingPerformance") {
+    throw new WritingFunctionError("invalid-argument", "練習元の種類が不正です。");
+  }
+  const referenceScript = normalizeWritingText(data && data.referenceScript);
+  const recognizedText = normalizeWritingText(data && data.recognizedText);
+  const durationMs = Number(data && data.durationMs);
+  if (!referenceScript || referenceScript.length > 5000 ||
+      !recognizedText || recognizedText.length > 10000 ||
+      !Number.isFinite(durationMs) || durationMs < 250 || durationMs > 600000) {
+    throw new WritingFunctionError("invalid-argument", "Speaking Challengeの結果が不正です。");
+  }
+
+  const testRef = classRef.collection("writingPerformanceTests").doc(testId);
+  const submissionRef = testRef.collection("submissions").doc(session.studentInternalUid);
+  const metrics = calculateSpeakingChallengeMetrics({
+    referenceScript,
+    recognizedText,
+    durationMs: Math.round(durationMs),
+  });
+  let savedChallenge;
+  await db.runTransaction(async (transaction) => {
+    const [testSnap, submissionSnap] = await Promise.all([
+      transaction.get(testRef),
+      transaction.get(submissionRef),
+    ]);
+    if (!testSnap.exists || !submissionSnap.exists) {
+      throw new WritingFunctionError("failed-precondition", "Writing提出後に利用できます。");
+    }
+    const submission = submissionSnap.data() || {};
+    const expectedReference = normalizeSpeakingWords(
+      submission.minimalCorrectedText || submission.submittedText
+    ).join(" ");
+    if (!expectedReference ||
+        expectedReference !== normalizeSpeakingWords(referenceScript).join(" ")) {
+      throw new WritingFunctionError("invalid-argument", "練習する英文を確認できませんでした。");
+    }
+
+    const previous = publicSpeakingChallenge(submission.speakingChallenge);
+    const performedAtMillis = Date.now();
+    const latest = {
+      recognizedText,
+      ...metrics,
+      performedAtMillis,
+    };
+    const previousBest = previous && previous.best;
+    const isBetter = !previousBest ||
+      latest.accuracy > previousBest.accuracy ||
+      (latest.accuracy === previousBest.accuracy && latest.wpm > previousBest.wpm);
+    const best = isBetter ? latest : previousBest;
+    savedChallenge = {
+      sourceType: "writingPerformance",
+      referenceScript,
+      completed: true,
+      relearningCompleted: true,
+      completedAt: submission.speakingChallenge?.completedAt || FieldValue.serverTimestamp(),
+      completedAtMillis: previous?.completedAtMillis || performedAtMillis,
+      attemptCount: (previous?.attemptCount || 0) + 1,
+      latest,
+      best,
+      schemaVersion: 2,
+      updatedAt: FieldValue.serverTimestamp(),
+      updatedAtMillis: performedAtMillis,
+    };
+    transaction.update(submissionRef, {
+      speakingChallenge: savedChallenge,
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+  });
+  return publicSpeakingChallenge(savedChallenge);
+}
+
 module.exports = {
   RUBRIC_KEYS,
   RUBRIC_LABELS,
@@ -688,11 +1209,18 @@ module.exports = {
   validatePerformanceTestData,
   buildPerformanceScoringPayload,
   validatePerformanceScore,
+  validateCorrections,
+  validatePracticeCorrections,
+  validateRewriteSegments,
   callPerformanceScoring,
   studentBelongsToClass,
   publicTestData,
+  publicSpeakingChallenge,
+  normalizeSpeakingWords,
+  calculateSpeakingChallengeMetrics,
   resolveWritingPerformancePreviewContext,
   listWritingPerformanceTestsForPreview,
   listWritingPerformanceTests,
   submitWritingPerformanceTest,
+  saveWritingPerformanceSpeakingChallenge,
 };

@@ -5,12 +5,14 @@ const { FieldValue, Timestamp } = require("firebase-admin/firestore");
 const { WritingAccessError, cleanId, cleanPassword } = require("./writing_access");
 const {
   RUBRIC_KEYS,
+  publicSpeakingChallenge,
   validatePerformanceTestData,
 } = require("./writing_performance");
 
 const TEACHER_SESSION_COLLECTION = "teacherSessions";
 const TEACHER_SESSION_IDLE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const TEACHER_SESSION_ABSOLUTE_TTL_MS = 60 * 24 * 60 * 60 * 1000;
+const COPYRIGHT_GUIDANCE_VERSION = "2026-10-09";
 
 function passwordsMatch(actual, expected) {
   const left = Buffer.from(String(actual || ""));
@@ -123,8 +125,31 @@ async function getTeacherProfileForTeacher({ db, authUid }) {
     teacherId: session.teacherId,
     teacherName: String(teacher.name || ""),
     isAdmin: teacher.isAdmin === true,
+    copyrightGuidanceAcceptedAtMillis: timestampMillis(
+      teacher.copyrightGuidanceAcceptedAt
+    ),
+    copyrightGuidanceVersion: String(
+      teacher.copyrightGuidanceVersion || ""
+    ),
     // Kept for compatibility with older Teacher Dashboard builds.
     writingEnabled: true,
+  };
+}
+
+async function acceptCopyrightGuidanceForTeacher({ db, authUid }) {
+  const session = await resolveWritingTeacherSession({ db, authUid });
+  const acceptedAtMillis = Date.now();
+  await db.collection("schools").doc(session.schoolId)
+    .collection("teachers").doc(session.teacherId).set({
+      copyrightGuidanceAcceptedAt: FieldValue.serverTimestamp(),
+      copyrightGuidanceAcceptedAtMillis: acceptedAtMillis,
+      copyrightGuidanceVersion: COPYRIGHT_GUIDANCE_VERSION,
+      updatedAt: FieldValue.serverTimestamp(),
+    }, { merge: true });
+  return {
+    ok: true,
+    copyrightGuidanceAcceptedAtMillis: acceptedAtMillis,
+    copyrightGuidanceVersion: COPYRIGHT_GUIDANCE_VERSION,
   };
 }
 
@@ -321,6 +346,9 @@ function submissionSummary(student, snap) {
     teacherTotalScore: value && Number.isFinite(value.teacherTotalScore) ? value.teacherTotalScore : null,
     teacherScores: value ? value.teacherScores || null : null,
     submittedAt: value ? timestampMillis(value.submittedAt) : null,
+    speakingChallenge: value
+      ? publicSpeakingChallenge(value.speakingChallenge)
+      : null,
   };
 }
 
@@ -464,6 +492,7 @@ async function getWritingPerformanceSubmissionForTeacher({ db, authUid, data }) 
     finalizedBy: evaluation.finalizedBy,
     submittedAt: timestampMillis(value.submittedAt),
     reviewedAt: timestampMillis(value.reviewedAt),
+    speakingChallenge: publicSpeakingChallenge(value.speakingChallenge),
   } };
 }
 
@@ -596,10 +625,12 @@ async function saveWritingPerformanceQuickEvaluationForTeacher({ db, authUid, da
 
 module.exports = {
   TEACHER_SESSION_COLLECTION,
+  COPYRIGHT_GUIDANCE_VERSION,
   authenticateWritingTeacher,
   refreshWritingTeacherSession,
   resolveWritingTeacherSession,
   getTeacherProfileForTeacher,
+  acceptCopyrightGuidanceForTeacher,
   createWritingPerformanceTestForTeacher,
   listWritingPerformanceTestsForTeacher,
   listWritingClassesForTeacher,
