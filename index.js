@@ -16,6 +16,16 @@ const path = require("path");
 const os = require("os");
 const fetch = require("node-fetch");
 const FormData = require("form-data");
+const {
+  SecureAudioAccessError,
+  assertPathPrefix,
+  assertTeacherOutputPath,
+  enforceRateLimit,
+  requireStudentSession,
+  requireTeacherSession,
+  resolveStoragePath,
+  validateAudioObject,
+} = require("./secure_audio_access");
 
 // 🔥 ffmpeg（WebM → WAV 変換）
 const ffmpegPath = require("ffmpeg-static");
@@ -1415,21 +1425,41 @@ exports.transcribeFromUrlV2 = onCall(
     let tmpWav = null;
 
     try {
-      const audioUrl = req.data.audioUrl || req.data.sourceUrl;
-      const subtitleStoragePath = req.data.subtitleStoragePath || null;
-      const normalizedAudioStoragePath =
-        req.data.normalizedAudioStoragePath || null;
-      const waveformStoragePath = req.data.waveformStoragePath || null;
+      const teacher = await requireTeacherSession({ db, authUid: req.auth?.uid });
+      const bucket = storage.bucket();
+      const storagePath = resolveStoragePath({
+        data: req.data,
+        expectedBucket: bucket.name,
+      });
+      assertPathPrefix(storagePath, [`school_materials/${teacher.schoolId}/`]);
+      const subtitleStoragePath = assertTeacherOutputPath(
+        req.data.subtitleStoragePath,
+        teacher.schoolId,
+        [".json"]
+      );
+      const normalizedAudioStoragePath = assertTeacherOutputPath(
+        req.data.normalizedAudioStoragePath,
+        teacher.schoolId,
+        [".wav"]
+      );
+      const waveformStoragePath = assertTeacherOutputPath(
+        req.data.waveformStoragePath,
+        teacher.schoolId,
+        [".json"]
+      );
+      await enforceRateLimit({
+        db,
+        authUid: teacher.authUid,
+        operation: "teacherStt",
+        limit: 30,
+        windowMs: 60 * 60 * 1000,
+      });
 
       console.log("🟦 transcribeFromUrlV2 called");
-      console.log("audioUrl =", audioUrl);
+      console.log("storagePath =", storagePath);
       console.log("subtitleStoragePath =", subtitleStoragePath);
       console.log("normalizedAudioStoragePath =", normalizedAudioStoragePath);
       console.log("waveformStoragePath =", waveformStoragePath);
-
-      if (!audioUrl) throw new Error("audioUrl required");
-
-      const bucket = storage.bucket();
 
       // =====================================================
       // ① 既存JSON確認
@@ -1471,26 +1501,13 @@ exports.transcribeFromUrlV2 = onCall(
         };
       }
 
-      const audioResp = await fetch(audioUrl);
-      console.log("audio fetch status =", audioResp.status, audioResp.statusText);
-
-      if (!audioResp.ok) {
-        throw new Error(
-          `Failed to fetch audio: ${audioResp.status} ${audioResp.statusText}`
-        );
-      }
-
-      const respContentType = audioResp.headers.get("content-type") || "";
-      console.log("audio response content-type =", respContentType);
-
-      const ab = await audioResp.arrayBuffer();
-      console.log("arrayBuffer byteLength =", ab.byteLength);
-
-      const buf = Buffer.from(ab);
-      console.log("audio bytes =", buf.length);
-
       tmpIn = path.join(os.tmpdir(), `input_${Date.now()}.wav`);
-      fs.writeFileSync(tmpIn, buf);
+      const source = await validateAudioObject({
+        bucket,
+        storagePath,
+        maxBytes: 50 * 1024 * 1024,
+      });
+      await source.file.download({ destination: tmpIn });
       console.log("💾 tmp input written:", tmpIn);
       console.log("tmpIn exists =", fs.existsSync(tmpIn));
 
@@ -1597,7 +1614,10 @@ exports.transcribeFromUrlV2 = onCall(
       };
     } catch (e) {
       console.error("🚨 transcribeFromUrlV2 failed:", e);
-      throw new Error(e.message || String(e));
+      if (e instanceof SecureAudioAccessError) {
+        throw new HttpsError(e.code, e.message);
+      }
+      throw new HttpsError("internal", "音声解析に失敗しました。");
     } finally {
       try {
         if (tmpIn && fs.existsSync(tmpIn)) fs.unlinkSync(tmpIn);
@@ -1625,41 +1645,49 @@ exports.transcribeStudentRecording = onCall(
     let tmpIn = null;
 
     try {
-      const audioUrl = req.data.audioUrl || req.data.sourceUrl;
+      const student = await requireStudentSession({ db, authUid: req.auth?.uid });
+      const bucket = storage.bucket();
+      const storagePath = resolveStoragePath({
+        data: req.data,
+        expectedBucket: bucket.name,
+      });
+      assertPathPrefix(storagePath, [
+        `users/${student.authUid}/recordings/`,
+        `tempSttUploads/${student.authUid}/`,
+      ]);
+      await enforceRateLimit({
+        db,
+        authUid: student.authUid,
+        operation: "studentStt",
+        limit: 30,
+        windowMs: 10 * 60 * 1000,
+      });
 
       console.log("🟢 transcribeStudentRecording called");
-      console.log("audioUrl =", audioUrl);
-
-      if (!audioUrl) {
-        throw new Error("audioUrl required");
-      }
-
-      const audioResp = await fetch(audioUrl);
-      console.log("audio fetch status =", audioResp.status, audioResp.statusText);
-
-      if (!audioResp.ok) {
-        throw new Error(
-          `Failed to fetch audio: ${audioResp.status} ${audioResp.statusText}`
-        );
-      }
-
-      const ab = await audioResp.arrayBuffer();
-      const buf = Buffer.from(ab);
+      console.log("storagePath =", storagePath);
 
       tmpIn = path.join(os.tmpdir(), `student_recording_${Date.now()}.wav`);
-      fs.writeFileSync(tmpIn, buf);
+      const source = await validateAudioObject({
+        bucket,
+        storagePath,
+        maxBytes: 24 * 1024 * 1024,
+      });
+      await source.file.download({ destination: tmpIn });
 
       console.log("💾 student tmp audio written:", tmpIn);
-      console.log("audio bytes =", buf.length);
+      console.log("audio bytes =", source.size);
 
       const whisperResult = await callWhisperVerboseJson(tmpIn, {
         wantWords: false,
       });
 
-      console.log("📝 OpenAI Whisper result =", JSON.stringify(whisperResult));
-
       const text = (whisperResult.text || "").trim();
-
+      console.log("📝 OpenAI Whisper completed", {
+        textLength: text.length,
+        segmentCount: Array.isArray(whisperResult.segments)
+          ? whisperResult.segments.length
+          : 0,
+      });
       return {
         success: true,
         provider: "openai_whisper",
@@ -1674,7 +1702,10 @@ exports.transcribeStudentRecording = onCall(
       };
     } catch (e) {
       console.error("🚨 transcribeStudentRecording failed:", e);
-      throw new Error(e.message || String(e));
+      if (e instanceof SecureAudioAccessError) {
+        throw new HttpsError(e.code, e.message);
+      }
+      throw new HttpsError("internal", "音声解析に失敗しました。");
     } finally {
       try {
         if (tmpIn && fs.existsSync(tmpIn)) fs.unlinkSync(tmpIn);

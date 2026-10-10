@@ -3,6 +3,7 @@
   "description": "Cloud Functions for Firebase",
   "type": "commonjs",
   "scripts": {
+    "test": "node --test test/secure_audio_access.test.js",
     "serve": "firebase emulators:start --only functions",
     "shell": "firebase functions:shell",
     "start": "npm run shell",
