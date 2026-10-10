@@ -7,12 +7,14 @@ const {
   SESSION_ABSOLUTE_TTL_MS,
   isWritingEnabledFromFeatureFlagData,
   authenticateStudentSession,
+  changeStudentPassword,
   refreshStudentSession,
   registerWritingStudentSession,
   getWritingFeatureStatus,
   assertWritingEnabledForAuth,
   setSchoolWritingFeature,
 } = require("../writing_access");
+const { writeCredential } = require("../credential_security");
 
 class FakeFirestore {
   constructor(initial = {}) {
@@ -110,10 +112,24 @@ class FakeDoc {
     }
     const current = clone(this.db.store.get(this.path));
     for (const [key, value] of Object.entries(data)) {
-      setDotPath(current, key, value);
+      if (value?.constructor?.name === "DeleteTransform") {
+        deleteDotPath(current, key);
+      } else {
+        setDotPath(current, key, value);
+      }
     }
     this.db.store.set(this.path, current);
   }
+}
+
+function deleteDotPath(target, path) {
+  const parts = path.split(".");
+  let cursor = target;
+  for (let i = 0; i < parts.length - 1; i += 1) {
+    if (!cursor[parts[i]]) return;
+    cursor = cursor[parts[i]];
+  }
+  delete cursor[parts[parts.length - 1]];
 }
 
 const fakeAdmin = {
@@ -214,6 +230,66 @@ function baseDb({ writingEnabled } = {}) {
     const ttl = result.sessionExpiresAtMillis - Date.now();
     assert.ok(ttl <= SESSION_IDLE_TTL_MS);
     assert.ok(ttl >= SESSION_IDLE_TTL_MS - 2000);
+    const migrated = await db.collection("schoolCredentials").doc("schoolA")
+      .collection("studentCredentials").doc("student1").get();
+    assert.strictEqual(migrated.exists, true);
+    const profile = await db.collection("schools").doc("schoolA")
+      .collection("students").doc("student1").get();
+    assert.strictEqual(profile.data().password, undefined);
+  });
+
+  await test("new scrypt credential login succeeds and a wrong password is rejected", async () => {
+    const db = baseDb({ writingEnabled: true });
+    await writeCredential({
+      db,
+      schoolId: "schoolA",
+      principalType: "student",
+      principalId: "student1",
+      password: "hashed-pass",
+    });
+    delete db.store.get("schools/schoolA/students/student1").password;
+    const result = await authenticateStudentSession({
+      db,
+      authUid: "hash-auth",
+      data: { schoolCode: "SCH-A", loginId: "s001", password: "hashed-pass" },
+    });
+    assert.strictEqual(result.studentInternalUid, "student1");
+    await assert.rejects(
+      () => authenticateStudentSession({
+        db,
+        authUid: "hash-auth-bad",
+        data: { schoolCode: "SCH-A", loginId: "s001", password: "wrong" },
+      }),
+      /正しくありません/
+    );
+  });
+
+  await test("password change replaces the hash and invalidates the old password", async () => {
+    const db = baseDb({ writingEnabled: true });
+    await authenticateStudentSession({
+      db,
+      authUid: "change-auth",
+      data: { schoolCode: "SCH-A", loginId: "s001", password: "pass123" },
+    });
+    await changeStudentPassword({
+      db,
+      authUid: "change-auth",
+      data: { newPassword: "new-pass-2026" },
+    });
+    await assert.rejects(
+      () => authenticateStudentSession({
+        db,
+        authUid: "old-pass-auth",
+        data: { schoolCode: "SCH-A", loginId: "s001", password: "pass123" },
+      }),
+      /正しくありません/
+    );
+    const next = await authenticateStudentSession({
+      db,
+      authUid: "new-pass-auth",
+      data: { schoolCode: "SCH-A", loginId: "s001", password: "new-pass-2026" },
+    });
+    assert.strictEqual(next.studentInternalUid, "student1");
   });
 
   await test("expired idle session is refreshed with the same 30 day TTL", async () => {

@@ -3,6 +3,11 @@
 const fs = require("fs");
 const path = require("path");
 const { HttpsError } = require("firebase-functions/v2/https");
+const { FieldValue } = require("firebase-admin/firestore");
+const {
+  credentialRef,
+  writeCredential,
+} = require("./credential_security");
 
 const DATASET_ID = "teacher_sales_demo_v1";
 const DEMO_CLASS_ID = "demo_class_teacher_sales_demo_v1";
@@ -63,7 +68,7 @@ async function assertDemoManager({ db, request, requestedSchoolId }) {
   };
 }
 
-function demoStudents(password = "") {
+function demoStudents() {
   const names = [
     "山田 太郎", "田中 花子", "佐藤 蓮", "鈴木 美咲", "高橋 陽斗",
     "伊藤 結衣", "渡辺 大翔", "中村 葵", "小林 悠真", "加藤 咲良",
@@ -83,7 +88,6 @@ function demoStudents(password = "") {
         className: "デモクラス",
         number,
         loginId: `demo${number}`,
-        ...(password ? { password } : {}),
         mustChangePassword: false,
         active: true,
         status: "active",
@@ -116,16 +120,29 @@ async function assertSuperAdmin({ db, request }) {
   return { uid };
 }
 
+async function demoCredentialConfigured({ db, schoolId }) {
+  const snap = await credentialRef({
+    db,
+    schoolId,
+    principalType: "student",
+    principalId: "demo_student_01",
+  }).get();
+  return snap.exists;
+}
+
 async function getConfiguredDemoPassword({ db, schoolId }) {
+  // Compatibility-only reader for legacy deployments. The returned plaintext
+  // is used solely to perform a one-time server-side migration and is never
+  // returned to a client or written to a new profile.
   const snap = await demoAuthenticationRef(db, schoolId).get();
   const password = String(snap.exists && snap.data().password || "").trim();
-  if (!password) {
+  if (!password && !await demoCredentialConfigured({ db, schoolId })) {
     throw new HttpsError(
       "failed-precondition",
       "Adminでデモ生徒用の初期パスワードを設定してください。",
     );
   }
-  return password;
+  return password || null;
 }
 
 async function readConfiguredDemoPassword({ db, schoolId }) {
@@ -143,13 +160,28 @@ async function setDemoAuthentication({ db, admin, schoolId, password, actorUid }
   if (value.length < 8 || value.length > 128) {
     throw new HttpsError("invalid-argument", "初期パスワードは8〜128文字で設定してください。");
   }
+  for (const student of demoStudents()) {
+    await writeCredential({
+      db,
+      schoolId: id,
+      principalType: "student",
+      principalId: student.id,
+      password: value,
+      metadata: {
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        changedByAuthUid: actorUid,
+        demoDatasetId: DATASET_ID,
+      },
+    });
+  }
   await demoAuthenticationRef(db, id).set({
-    password: value,
+    password: FieldValue.delete(),
+    configured: true,
     updatedBy: actorUid,
     updatedAt: admin.firestore.FieldValue.serverTimestamp(),
   }, { merge: true });
   const passwordWrites = [];
-  for (const student of demoStudents(value)) {
+  for (const student of demoStudents()) {
     const schoolStudentRef = schoolRef.collection("students").doc(student.id);
     const classStudentRef = schoolRef.collection("classes").doc(DEMO_CLASS_ID)
       .collection("students").doc(student.id);
@@ -158,10 +190,16 @@ async function setDemoAuthentication({ db, admin, schoolId, password, actorUid }
       classStudentRef.get(),
     ]);
     if (schoolStudentSnap.exists && schoolStudentSnap.data().demoDatasetId === DATASET_ID) {
-      passwordWrites.push({ ref: schoolStudentRef, data: { password: value } });
+      passwordWrites.push({
+        ref: schoolStudentRef,
+        data: { password: FieldValue.delete() },
+      });
     }
     if (classStudentSnap.exists && classStudentSnap.data().demoDatasetId === DATASET_ID) {
-      passwordWrites.push({ ref: classStudentRef, data: { password: value } });
+      passwordWrites.push({
+        ref: classStudentRef,
+        data: { password: FieldValue.delete() },
+      });
     }
   }
   const updatedDemoStudentDocuments = await commitWrites(db, passwordWrites);
@@ -175,8 +213,10 @@ async function getDemoAuthenticationForAdmin({ db, schoolId }) {
   if (!schoolSnap.exists) throw new HttpsError("not-found", "学校が存在しません。");
   const snap = await demoAuthenticationRef(db, id).get();
   return {
-    configured: snap.exists && String(snap.data().password || "").trim().length > 0,
-    password: snap.exists ? String(snap.data().password || "") : "",
+    configured: await demoCredentialConfigured({ db, schoolId: id }) ||
+      (snap.exists && String(snap.data().password || "").trim().length > 0),
+    password: "",
+    passwordStoredSecurely: await demoCredentialConfigured({ db, schoolId: id }),
   };
 }
 
@@ -232,7 +272,7 @@ async function commitWrites(db, writes) {
 
 async function revokeDemoStudentSessions({ db, admin, schoolId }) {
   const sessionsSnap = await db.collection("studentSessions").where("schoolId", "==", schoolId).get();
-  const demoStudentIds = new Set(demoStudents("placeholder").map((student) => student.id));
+  const demoStudentIds = new Set(demoStudents().map((student) => student.id));
   const revokedAt = admin.firestore.FieldValue.serverTimestamp();
   const writes = [];
   for (const sessionDoc of sessionsSnap.docs) {
@@ -258,7 +298,17 @@ async function initializeDemoEnvironment({ db, bucket, admin, schoolId, actor })
     throw new HttpsError("failed-precondition", "デモ用クラスIDと既存クラスが競合しています。");
   }
   const assets = await ensureExampleAssets({ bucket, schoolId: id });
-  const demoPassword = await readConfiguredDemoPassword({ db, schoolId: id });
+  const legacyDemoPassword = await readConfiguredDemoPassword({ db, schoolId: id });
+  if (legacyDemoPassword) {
+    await setDemoAuthentication({
+      db,
+      admin,
+      schoolId: id,
+      password: legacyDemoPassword,
+      actorUid: actor.uid,
+    });
+  }
+  const hasDemoCredential = await demoCredentialConfigured({ db, schoolId: id });
   const materialPaths = assets.paths;
   const materialData = {
     id: EXAMPLE_MATERIAL_ID,
@@ -309,7 +359,7 @@ async function initializeDemoEnvironment({ db, bucket, admin, schoolId, actor })
     { ref: classRef.collection("materials").doc(EXAMPLE_MATERIAL_ID), data: materialData },
   ];
 
-  const students = demoStudents(demoPassword || "");
+  const students = demoStudents();
   for (const student of students) {
     writes.push(
       { ref: schoolRef.collection("students").doc(student.id), data: { ...student.data, schoolId: id, updatedAt: now } },
@@ -414,8 +464,14 @@ async function initializeDemoEnvironment({ db, bucket, admin, schoolId, actor })
     exampleMaterialId: EXAMPLE_MATERIAL_ID,
     uploadedAssetCount: assets.uploaded,
     committedWrites,
-    demoLogin: demoPassword
-      ? { schoolCode: String(schoolSnap.data().schoolCode || id), loginId: "demo09", password: demoPassword }
+    demoLogin: hasDemoCredential
+      ? {
+        schoolCode: String(schoolSnap.data().schoolCode || id),
+        loginId: "demo09",
+        password: "",
+        passwordConfigured: true,
+        passwordStoredSecurely: true,
+      }
       : null,
   };
 }
@@ -430,11 +486,13 @@ async function getDemoCredentials({ db, schoolId }) {
   if (!schoolSnap.exists || !classSnap.exists || classSnap.data().demoDatasetId !== DATASET_ID) {
     throw new HttpsError("not-found", "デモ環境がまだ作成されていません。");
   }
-  const password = await getConfiguredDemoPassword({ db, schoolId: id });
+  await getConfiguredDemoPassword({ db, schoolId: id });
   return {
     schoolCode: String(schoolSnap.data().schoolCode || id),
     loginId: "demo09",
-    password,
+    password: "",
+    passwordConfigured: true,
+    passwordStoredSecurely: await demoCredentialConfigured({ db, schoolId: id }),
   };
 }
 
@@ -467,7 +525,7 @@ async function deleteDemoEnvironment({ db, bucket, admin, schoolId }) {
     await db.recursiveDelete(classRef);
     deletedDocuments += 1;
   }
-  for (const student of demoStudents("placeholder")) {
+  for (const student of demoStudents()) {
     const ref = schoolRef.collection("students").doc(student.id);
     const snap = await ref.get();
     if (snap.exists && snap.data().demoDatasetId === DATASET_ID) {

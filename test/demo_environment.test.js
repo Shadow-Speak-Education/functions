@@ -35,8 +35,9 @@ class FakeRef {
   }
   collection(name) { return new FakeCollection(this.db, `${this.path}/${name}`); }
   async get() { return new FakeSnapshot(this.db.docs.get(this.path)); }
-  async set(data) {
-    this.db.docs.set(this.path, { ...(this.db.docs.get(this.path) || {}), ...data });
+  async set(data, options = {}) {
+    const previous = options.merge === false ? {} : (this.db.docs.get(this.path) || {});
+    this.db.docs.set(this.path, applyData(previous, data));
   }
 }
 
@@ -71,7 +72,7 @@ class FakeDb {
       commit: async () => {
         for (const item of pending) {
           const previous = this.docs.get(item.ref.path) || {};
-          this.docs.set(item.ref.path, { ...previous, ...item.data });
+          this.docs.set(item.ref.path, applyData(previous, item.data));
         }
       },
     };
@@ -81,6 +82,18 @@ class FakeDb {
       if (key === ref.path || key.startsWith(`${ref.path}/`)) this.docs.delete(key);
     }
   }
+}
+
+function applyData(previous, data) {
+  const result = { ...previous };
+  for (const [key, value] of Object.entries(data)) {
+    if (value?.constructor?.name === "DeleteTransform") {
+      delete result[key];
+    } else {
+      result[key] = value;
+    }
+  }
+  return result;
 }
 
 class FakeBucket {
@@ -106,14 +119,13 @@ const fakeAdmin = {
   firestore: { FieldValue: { serverTimestamp: () => ({ serverTimestamp: true }) } },
 };
 
-test("demo students use fixed IDs and a supplied school-specific password", () => {
-  const password = "AdminSelected-2026!";
-  const students = demoStudents(password);
+test("demo students use fixed IDs without embedding a plaintext password", () => {
+  const students = demoStudents();
   assert.equal(students.length, 10);
   assert.equal(students[0].id, "demo_student_01");
   assert.equal(students[9].data.loginId, "demo10");
   for (const student of students) {
-    assert.equal(student.data.password, password);
+    assert.equal(student.data.password, undefined);
     assert.equal(student.data.classId, DEMO_CLASS_ID);
     assert.equal(student.data.demoDatasetId, DATASET_ID);
   }
@@ -150,11 +162,19 @@ test("Admin can configure the password without creating demo students", async ()
   });
   assert.equal(
     db.docs.get("schools/school-a/demoSettings/authentication").password,
-    "AdminSelected-2026!",
+    undefined,
+  );
+  assert.equal(
+    db.docs.has("schoolCredentials/school-a/studentCredentials/demo_student_01"),
+    true,
   );
   assert.equal(db.docs.has("schools/school-a/students/demo_student_01"), false);
   const stored = await getDemoAuthenticationForAdmin({ db, schoolId: "school-a" });
-  assert.deepEqual(stored, { configured: true, password: "AdminSelected-2026!" });
+  assert.deepEqual(stored, {
+    configured: true,
+    password: "",
+    passwordStoredSecurely: true,
+  });
 });
 
 test("demo authentication settings are restricted to the operations Admin", async () => {
@@ -236,8 +256,8 @@ test("initialization is idempotent and repairs fixed demo paths", async () => {
   assert.equal(second.uploadedAssetCount, 0);
   assert.equal(db.docs.size, documentCount);
   assert.equal(bucket.files.size, fileCount);
-  assert.equal(first.demoLogin.password, "AdminSelected-2026!");
-  assert.equal(second.demoLogin.password, first.demoLogin.password);
+  assert.equal(first.demoLogin.passwordConfigured, true);
+  assert.deepEqual(second.demoLogin, first.demoLogin);
   assert.equal(db.docs.has(`schools/school-a/classes/${DEMO_CLASS_ID}`), true);
   assert.equal(db.docs.has(`schools/school-a/classes/${DEMO_CLASS_ID}/materials/${EXAMPLE_MATERIAL_ID}`), true);
   assert.equal(db.docs.get(`schools/school-a/classes/${DEMO_CLASS_ID}/materials/${EXAMPLE_MATERIAL_ID}`).visible, true);
@@ -267,11 +287,11 @@ test("credentials are returned from the tagged demo class", async () => {
   assert.equal(update.updatedDemoStudentDocuments, 20);
   assert.equal(
     db.docs.get("schools/school-a/students/demo_student_09").password,
-    "AdminChanged-2026!",
+    undefined,
   );
   assert.equal(
-    (await getDemoCredentials({ db, schoolId: "school-a" })).password,
-    "AdminChanged-2026!",
+    (await getDemoCredentials({ db, schoolId: "school-a" })).passwordConfigured,
+    true,
   );
 });
 

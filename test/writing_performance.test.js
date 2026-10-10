@@ -953,7 +953,10 @@ async function test(name, fn) {
       ["schools/school-1", { schoolCode: "SCH-1" }],
       ["schools/school-1/classes/class-1", { name: "1A" }],
       ["schools/school-1/classes/class-1/students/student-1", { active: true }],
-      ["schools/school-1/students/student-1", { classIds: ["class-1"] }],
+      ["schools/school-1/students/student-1", {
+        classIds: ["class-1"],
+        password: "legacy-test-password",
+      }],
       ["schools/school-1/classes/class-1/writingPerformanceTests/test-1",
         performanceTest],
     ]);
@@ -1051,7 +1054,10 @@ async function test(name, fn) {
       ["schools/school-1", { schoolCode: "SCH-1" }],
       ["schools/school-1/classes/class-1", { name: "1A" }],
       ["schools/school-1/classes/class-1/students/student-1", { active: true }],
-      ["schools/school-1/students/student-1", { classIds: ["class-1"] }],
+      ["schools/school-1/students/student-1", {
+        classIds: ["class-1"],
+        password: "legacy-test-password",
+      }],
       ["schools/school-1/classes/class-1/writingPerformanceTests/test-1", {
         ...testData,
         isActive: true,
@@ -1121,7 +1127,10 @@ async function test(name, fn) {
       ["schools/school-1", { schoolCode: "SCH-1" }],
       ["schools/school-1/classes/class-1", { name: "1A" }],
       ["schools/school-1/classes/class-1/students/student-1", { active: true }],
-      ["schools/school-1/students/student-1", { classIds: ["class-1"] }],
+      ["schools/school-1/students/student-1", {
+        classIds: ["class-1"],
+        password: "legacy-test-password",
+      }],
       ["schools/school-1/classes/class-1/writingPerformanceTests/test-1", {
         ...testData,
         isActive: true,
@@ -1200,7 +1209,10 @@ async function test(name, fn) {
       ["schools/school-1", { schoolCode: "SCH-1" }],
       ["schools/school-1/classes/class-1", { name: "1A" }],
       ["schools/school-1/classes/class-1/students/student-1", { active: true }],
-      ["schools/school-1/students/student-1", { classIds: ["class-1"] }],
+      ["schools/school-1/students/student-1", {
+        classIds: ["class-1"],
+        password: "legacy-test-password",
+      }],
       ["schools/school-1/classes/class-1/writingPerformanceTests/test-1", {
         ...testData,
         isActive: true,

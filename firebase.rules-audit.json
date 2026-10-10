@@ -1,6 +1,6 @@
 {
   "firestore": {
-    "rules": "rules/firestore.candidate-deny-fallback.rules"
+    "rules": "rules/firestore.rules"
   },
   "emulators": {
     "firestore": {

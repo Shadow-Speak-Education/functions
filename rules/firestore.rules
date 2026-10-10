@@ -1,0 +1,385 @@
+// Canonical Shadow Speak for School Firestore rules.
+// Deploy only after emulator audit and an explicit production approval.
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function teacherSession() {
+      return get(/databases/$(database)/documents/teacherSessions/$(request.auth.uid));
+    }
+
+    function studentSession() {
+      return get(/databases/$(database)/documents/studentSessions/$(request.auth.uid));
+    }
+
+    function isTeacherForSchool(schoolId) {
+      return isSignedIn()
+        && exists(/databases/$(database)/documents/teacherSessions/$(request.auth.uid))
+        && teacherSession().data.role == 'teacher'
+        && teacherSession().data.active == true
+        && teacherSession().data.schoolId == schoolId
+        && teacherSession().data.expiresAt > request.time;
+    }
+
+    function isStudentForSchool(schoolId) {
+      return isSignedIn()
+        && exists(/databases/$(database)/documents/studentSessions/$(request.auth.uid))
+        && studentSession().data.role == 'student'
+        && studentSession().data.active == true
+        && studentSession().data.schoolId == schoolId
+        && studentSession().data.expiresAt > request.time;
+    }
+
+    function isTeacherPreviewForSchool(schoolId) {
+      return isSignedIn()
+        && request.auth.token.get('role', '') == 'teacher_preview'
+        && request.auth.token.get('schoolId', '') == schoolId;
+    }
+
+    function isTeacherPreviewForClass(schoolId, classId) {
+      return isTeacherPreviewForSchool(schoolId)
+        && request.auth.token.get('classId', '') == classId;
+    }
+
+    function isOwnStudent(schoolId, studentId) {
+      return isStudentForSchool(schoolId)
+        && (studentSession().data.studentId == studentId
+          || studentSession().data.studentInternalUid == studentId);
+    }
+
+    function isSchoolMember(schoolId) {
+      return isTeacherForSchool(schoolId)
+        || isStudentForSchool(schoolId)
+        || isTeacherPreviewForSchool(schoolId);
+    }
+
+    function isClassMember(schoolId, classId) {
+      return isTeacherForSchool(schoolId)
+        || isStudentForSchool(schoolId)
+        || isTeacherPreviewForClass(schoolId, classId);
+    }
+
+    function studentSessionMatches(studentId) {
+      return studentSession().data.studentId == studentId
+        || studentSession().data.studentInternalUid == studentId;
+    }
+
+    function isAdmin() {
+      return isSignedIn()
+        && exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+        && get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.active == true
+        && get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.role == 'admin';
+    }
+
+    function isAdminForSchool(schoolId) {
+      return isAdmin();
+    }
+
+    function isTeacherAdminForSchool(schoolId) {
+      return isTeacherForSchool(schoolId)
+        && exists(/databases/$(database)/documents/schools/$(schoolId)/teachers/$(teacherSession().data.teacherId))
+        && get(/databases/$(database)/documents/schools/$(schoolId)/teachers/$(teacherSession().data.teacherId)).data.isAdmin == true;
+    }
+
+    function hasCredentialField(data) {
+      return data.keys().hasAny([
+        'password', 'passwordHash', 'salt', 'passwordSalt',
+        'credential', 'credentials', 'initialPassword', 'newPassword'
+      ]);
+    }
+
+    function credentialFieldsUnchanged() {
+      return !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+        'password', 'passwordHash', 'salt', 'passwordSalt',
+        'credential', 'credentials', 'initialPassword', 'newPassword'
+      ]);
+    }
+
+    function safeStudentProfileUpdate() {
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+        'lastSelectedClassId', 'lastSelectedClassName',
+        'uiPreferences', 'updatedAt'
+      ]);
+    }
+
+    function safeUserStatsUpdate() {
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+        'totalPractices', 'totalMinutes', 'averageScore', 'lastLogin',
+        'updatedAt'
+      ]);
+    }
+
+    function safeClassStudentProgressUpdate() {
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+        'listeningProgress', 'lastListeningMaterialId',
+        'lastListeningPracticedAt', 'dailyStatsByDate',
+        'lastPracticedAt', 'updatedAt'
+      ]);
+    }
+
+    function validOwnClassStudentCreate(schoolId, classId, studentId) {
+      return isOwnStudent(schoolId, studentId)
+        && request.resource.data.schoolId == schoolId
+        && request.resource.data.classId == classId
+        && request.resource.data.studentInternalUid == studentId
+        && request.resource.data.internalUid == studentId
+        && request.resource.data.studentDocId == studentId
+        && request.resource.data.membershipStatus == 'active'
+        && request.resource.data.isCurrent == true
+        && exists(/databases/$(database)/documents/schools/$(schoolId)/classes/$(classId));
+    }
+
+    function validPerformanceLog(schoolId) {
+      return isSchoolMember(schoolId)
+        && (!request.resource.data.keys().hasAny(['schoolId'])
+          || request.resource.data.schoolId == schoolId)
+        && request.resource.data.createdAt == request.time
+        && (!request.resource.data.keys().hasAny(['userId'])
+          || request.resource.data.userId == request.auth.uid)
+        && (!isStudentForSchool(schoolId)
+          || !request.resource.data.keys().hasAny(['studentId'])
+          || studentSessionMatches(request.resource.data.studentId));
+    }
+
+    function isTeacherForExistingUser(userId) {
+      return exists(/databases/$(database)/documents/users/$(userId))
+        && isTeacherForSchool(
+          get(/databases/$(database)/documents/users/$(userId)).data.schoolId
+        );
+    }
+
+    match /users/{userId} {
+      allow read: if (isSignedIn() && request.auth.uid == userId)
+        || isTeacherForExistingUser(userId);
+      allow update: if (isSignedIn() && request.auth.uid == userId
+          && safeUserStatsUpdate())
+        || (isTeacherForExistingUser(userId) && credentialFieldsUnchanged());
+      allow create: if (isSignedIn() && request.auth.uid == userId
+          && !hasCredentialField(request.resource.data))
+        || (isTeacherForSchool(request.resource.data.schoolId)
+          && !hasCredentialField(request.resource.data));
+      allow delete: if isTeacherForExistingUser(userId);
+
+      match /dailyStats/{statId} {
+        allow read, create, update: if isSignedIn() && request.auth.uid == userId;
+        allow delete: if false;
+      }
+
+      match /joinedClasses/{classId} {
+        allow read, write: if (isSignedIn() && request.auth.uid == userId)
+          || isTeacherForExistingUser(userId);
+      }
+
+      match /{subPath=**} {
+        allow read, write: if false;
+      }
+    }
+
+    match /schools/{schoolId} {
+      allow read: if isSchoolMember(schoolId) || isAdminForSchool(schoolId);
+      allow update: if isTeacherAdminForSchool(schoolId) || isAdminForSchool(schoolId);
+      allow create, delete: if isAdminForSchool(schoolId);
+
+      match /performanceLogs/{logId} {
+        allow create: if validPerformanceLog(schoolId);
+        allow read, update, delete: if false;
+      }
+
+      match /teachers/{teacherId} {
+        allow read: if isTeacherAdminForSchool(schoolId) || isAdminForSchool(schoolId);
+        allow create: if (isTeacherAdminForSchool(schoolId) || isAdminForSchool(schoolId))
+          && !hasCredentialField(request.resource.data);
+        allow update: if (isTeacherAdminForSchool(schoolId) || isAdminForSchool(schoolId))
+          && credentialFieldsUnchanged();
+        allow delete: if isTeacherAdminForSchool(schoolId) || isAdminForSchool(schoolId);
+      }
+
+      match /students/{studentId} {
+        allow read: if isOwnStudent(schoolId, studentId)
+          || isTeacherForSchool(schoolId)
+          || isAdminForSchool(schoolId);
+        allow create: if (isTeacherForSchool(schoolId) || isAdminForSchool(schoolId))
+          && !hasCredentialField(request.resource.data);
+        allow delete: if isTeacherForSchool(schoolId) || isAdminForSchool(schoolId);
+        allow update: if (isOwnStudent(schoolId, studentId)
+            && safeStudentProfileUpdate())
+          || ((isTeacherForSchool(schoolId) || isAdminForSchool(schoolId))
+            && credentialFieldsUnchanged());
+
+        match /joinedClasses/{classId} {
+          allow read: if isOwnStudent(schoolId, studentId)
+            || isTeacherForSchool(schoolId)
+            || isAdminForSchool(schoolId);
+          allow create, update: if (isOwnStudent(schoolId, studentId)
+              && request.resource.data.schoolId == schoolId
+              && request.resource.data.classId == classId)
+            || isTeacherForSchool(schoolId)
+            || isAdminForSchool(schoolId);
+          allow delete: if isTeacherForSchool(schoolId) || isAdminForSchool(schoolId);
+        }
+      }
+
+      match /materials/{materialId} {
+        allow read: if isSchoolMember(schoolId) || isAdminForSchool(schoolId);
+        allow write: if isTeacherForSchool(schoolId) || isAdminForSchool(schoolId);
+      }
+
+      match /vocabLists/{vocabListId} {
+        allow read: if isSchoolMember(schoolId) || isAdminForSchool(schoolId);
+        allow write: if isTeacherForSchool(schoolId) || isAdminForSchool(schoolId);
+        match /words/{wordId} {
+          allow read: if isSchoolMember(schoolId) || isAdminForSchool(schoolId);
+          allow write: if isTeacherForSchool(schoolId) || isAdminForSchool(schoolId);
+        }
+      }
+
+      match /classes/{classId} {
+        allow read: if isClassMember(schoolId, classId) || isAdminForSchool(schoolId);
+        allow write: if isTeacherForSchool(schoolId) || isAdminForSchool(schoolId);
+
+        match /students/{studentId} {
+          allow read: if isOwnStudent(schoolId, studentId)
+            || isTeacherForSchool(schoolId)
+            || isAdminForSchool(schoolId);
+          allow create: if validOwnClassStudentCreate(schoolId, classId, studentId)
+            || isTeacherForSchool(schoolId)
+            || isAdminForSchool(schoolId);
+          allow update: if (isOwnStudent(schoolId, studentId)
+              && safeClassStudentProgressUpdate())
+            || isTeacherForSchool(schoolId)
+            || isAdminForSchool(schoolId);
+          allow delete: if isTeacherForSchool(schoolId) || isAdminForSchool(schoolId);
+
+          match /dailyStats/{statId} {
+            allow read, write: if isOwnStudent(schoolId, studentId)
+              || isTeacherForSchool(schoolId)
+              || isAdminForSchool(schoolId);
+          }
+          match /lessonProgress/{progressId} {
+            allow read, write: if isOwnStudent(schoolId, studentId)
+              || isTeacherForSchool(schoolId)
+              || isAdminForSchool(schoolId);
+          }
+          match /practiceResults/{resultId} {
+            allow read, write: if isOwnStudent(schoolId, studentId)
+              || isTeacherForSchool(schoolId)
+              || isAdminForSchool(schoolId);
+          }
+        }
+
+        match /materials/{materialId} {
+          allow read: if isClassMember(schoolId, classId) || isAdminForSchool(schoolId);
+          allow write: if isTeacherForSchool(schoolId) || isAdminForSchool(schoolId);
+          match /results/{studentId} {
+            allow read, write: if isOwnStudent(schoolId, studentId)
+              || isTeacherForSchool(schoolId)
+              || isAdminForSchool(schoolId);
+          }
+        }
+
+        match /vocabLists/{vocabListId} {
+          allow read: if isClassMember(schoolId, classId) || isAdminForSchool(schoolId);
+          allow write: if isTeacherForSchool(schoolId) || isAdminForSchool(schoolId);
+          match /words/{wordId} {
+            allow read: if isClassMember(schoolId, classId) || isAdminForSchool(schoolId);
+            allow write: if isTeacherForSchool(schoolId) || isAdminForSchool(schoolId);
+          }
+        }
+
+        match /vocabTests/{testId} {
+          allow read: if isClassMember(schoolId, classId) || isAdminForSchool(schoolId);
+          allow write: if isTeacherForSchool(schoolId) || isAdminForSchool(schoolId);
+          match /results/{studentId} {
+            allow read, write: if isOwnStudent(schoolId, studentId)
+              || isTeacherForSchool(schoolId)
+              || isAdminForSchool(schoolId);
+          }
+          match /words/{itemId} {
+            allow read: if isClassMember(schoolId, classId) || isAdminForSchool(schoolId);
+            allow write: if isTeacherForSchool(schoolId) || isAdminForSchool(schoolId);
+          }
+          match /items/{itemId} {
+            allow read: if isClassMember(schoolId, classId) || isAdminForSchool(schoolId);
+            allow write: if isTeacherForSchool(schoolId) || isAdminForSchool(schoolId);
+          }
+          match /vocabItems/{itemId} {
+            allow read: if isClassMember(schoolId, classId) || isAdminForSchool(schoolId);
+            allow write: if isTeacherForSchool(schoolId) || isAdminForSchool(schoolId);
+          }
+        }
+
+        match /submit_boxes/{boxId} {
+          allow read: if isClassMember(schoolId, classId) || isAdminForSchool(schoolId);
+          allow write: if isTeacherForSchool(schoolId) || isAdminForSchool(schoolId);
+          match /submissions/{submissionId} {
+            allow create: if isTeacherForSchool(schoolId)
+              || isAdminForSchool(schoolId)
+              || (isStudentForSchool(schoolId)
+                && studentSessionMatches(request.resource.data.studentInternalUid));
+            allow read: if isTeacherForSchool(schoolId)
+              || isAdminForSchool(schoolId)
+              || (isStudentForSchool(schoolId)
+                && studentSessionMatches(resource.data.studentInternalUid));
+            allow update: if isTeacherForSchool(schoolId)
+              || isAdminForSchool(schoolId)
+              || (isStudentForSchool(schoolId)
+                && studentSessionMatches(resource.data.studentInternalUid)
+                && studentSessionMatches(request.resource.data.studentInternalUid));
+            allow delete: if isTeacherForSchool(schoolId) || isAdminForSchool(schoolId);
+          }
+        }
+
+        match /assignments/{assignmentId} {
+          allow read, write: if isTeacherForSchool(schoolId)
+            || isAdminForSchool(schoolId);
+        }
+
+        match /submissions/{submissionId} {
+          allow read, write: if isTeacherForSchool(schoolId)
+            || isAdminForSchool(schoolId);
+        }
+
+        // Writing Performance Test is callable-only for both clients.
+        match /writingPerformanceTests/{testId} {
+          allow read, write: if false;
+          match /{subPath=**} {
+            allow read, write: if false;
+          }
+        }
+      }
+    }
+
+    // Admin SDK only. Client reads would expose reusable authorization state.
+    match /studentSessions/{authUid} {
+      allow read, write: if false;
+    }
+    match /teacherSessions/{authUid} {
+      allow read, write: if false;
+    }
+    match /writingFeatureFlags/{schoolId} {
+      allow read, write: if false;
+    }
+    match /admins/{uid} {
+      allow read, write: if false;
+    }
+
+    // Password hashes and salts are Admin SDK-only.
+    match /schoolCredentials/{schoolId}/{document=**} {
+      allow read, write: if false;
+    }
+
+    // Curated educational content only; no student or teacher credentials.
+    match /official_materials/{document=**} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

@@ -1,8 +1,12 @@
 "use strict";
 
-const crypto = require("crypto");
 const { FieldValue, Timestamp } = require("firebase-admin/firestore");
 const { WritingAccessError, cleanId, cleanPassword } = require("./writing_access");
+const {
+  currentCredentialFingerprint,
+  verifyCredential,
+  writeCredential,
+} = require("./credential_security");
 const {
   RUBRIC_KEYS,
   publicSpeakingChallenge,
@@ -13,16 +17,6 @@ const TEACHER_SESSION_COLLECTION = "teacherSessions";
 const TEACHER_SESSION_IDLE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const TEACHER_SESSION_ABSOLUTE_TTL_MS = 60 * 24 * 60 * 60 * 1000;
 const COPYRIGHT_GUIDANCE_VERSION = "2026-10-09";
-
-function passwordsMatch(actual, expected) {
-  const left = Buffer.from(String(actual || ""));
-  const right = Buffer.from(String(expected || ""));
-  return left.length === right.length && crypto.timingSafeEqual(left, right);
-}
-
-function credentialFingerprint(password) {
-  return crypto.createHash("sha256").update(String(password || "")).digest("hex");
-}
 
 async function authenticateWritingTeacher({ db, authUid, data }) {
   const uid = cleanId(authUid, "認証UID");
@@ -37,7 +31,19 @@ async function authenticateWritingTeacher({ db, authUid, data }) {
   const school = schools.docs[0];
   const teacherSnap = await school.ref.collection("teachers").doc(teacherId).get();
   const teacher = teacherSnap.exists ? teacherSnap.data() : null;
-  if (!teacher || teacher.active === false || !passwordsMatch(password, teacher.password)) {
+  if (!teacher || teacher.active === false) {
+    throw new WritingAccessError("permission-denied", "学校ID、Teacher ID、またはパスワードが正しくありません。");
+  }
+  const credential = await verifyCredential({
+    db,
+    schoolId: school.id,
+    principalType: "teacher",
+    principalId: teacherId,
+    password,
+    profileRef: teacherSnap.ref,
+    legacyPassword: teacher.password,
+  });
+  if (!credential.valid) {
     throw new WritingAccessError("permission-denied", "学校ID、Teacher ID、またはパスワードが正しくありません。");
   }
   const now = FieldValue.serverTimestamp();
@@ -51,7 +57,7 @@ async function authenticateWritingTeacher({ db, authUid, data }) {
     teacherId,
     expiresAt: Timestamp.fromMillis(sessionExpiresAtMillis),
     absoluteExpiresAt: Timestamp.fromMillis(absoluteExpiresAtMillis),
-    credentialFingerprint: credentialFingerprint(teacher.password),
+    credentialFingerprint: credential.fingerprint,
     createdAt: now,
     updatedAt: now,
   }, { merge: true });
@@ -82,9 +88,19 @@ async function resolveWritingTeacherSession({ db, authUid }) {
   const teacherId = cleanId(session.teacherId, "teacherId");
   const teacherSnap = await db.collection("schools").doc(schoolId)
     .collection("teachers").doc(teacherId).get();
-  if (!teacherSnap.exists || teacherSnap.data().active === false ||
+  const teacher = teacherSnap.exists ? teacherSnap.data() : null;
+  const activeFingerprint = teacher
+    ? await currentCredentialFingerprint({
+      db,
+      schoolId,
+      principalType: "teacher",
+      principalId: teacherId,
+      legacyPassword: teacher.password,
+    })
+    : "";
+  if (!teacher || teacher.active === false || !activeFingerprint ||
       (session.credentialFingerprint &&
-       session.credentialFingerprint !== credentialFingerprint(teacherSnap.data().password))) {
+       session.credentialFingerprint !== activeFingerprint)) {
     throw new WritingAccessError("permission-denied", "教師用Writing操作の権限がありません。");
   }
   return { authUid: uid, schoolId, teacherId };
@@ -106,13 +122,144 @@ async function refreshWritingTeacherSession({ db, authUid }) {
   );
   const teacherSnap = await db.collection("schools").doc(session.schoolId)
     .collection("teachers").doc(session.teacherId).get();
+  const activeFingerprint = await currentCredentialFingerprint({
+    db,
+    schoolId: session.schoolId,
+    principalType: "teacher",
+    principalId: session.teacherId,
+    legacyPassword: teacherSnap.data().password,
+  });
   await sessionRef.set({
     expiresAt: Timestamp.fromMillis(sessionExpiresAtMillis),
     absoluteExpiresAt: Timestamp.fromMillis(absoluteExpiresAtMillis),
-    credentialFingerprint: credentialFingerprint(teacherSnap.data().password),
+    credentialFingerprint: activeFingerprint,
     updatedAt: FieldValue.serverTimestamp(),
   }, { merge: true });
   return { ok: true, sessionExpiresAtMillis };
+}
+
+async function requireSchoolTeacherAdmin({ db, authUid }) {
+  const session = await resolveWritingTeacherSession({ db, authUid });
+  const teacherSnap = await db.collection("schools").doc(session.schoolId)
+    .collection("teachers").doc(session.teacherId).get();
+  if (!teacherSnap.exists || teacherSnap.data().isAdmin !== true) {
+    throw new WritingAccessError("permission-denied", "学校管理者のみ変更できます。");
+  }
+  return session;
+}
+
+async function setStudentCredentialForTeacher({ db, authUid, data }) {
+  const session = await resolveWritingTeacherSession({ db, authUid });
+  const studentId = cleanId(data && data.studentId, "studentId");
+  const password = cleanPassword(data && data.password);
+  const studentRef = db.collection("schools").doc(session.schoolId)
+    .collection("students").doc(studentId);
+  const studentSnap = await studentRef.get();
+  if (!studentSnap.exists) {
+    throw new WritingAccessError("not-found", "対象の生徒が見つかりません。");
+  }
+  await writeCredential({
+    db,
+    schoolId: session.schoolId,
+    principalType: "student",
+    principalId: studentId,
+    password,
+    metadata: {
+      createdAt: FieldValue.serverTimestamp(),
+      changedByTeacherId: session.teacherId,
+    },
+  });
+  await studentRef.update({
+    password: FieldValue.delete(),
+    mustChangePassword: data && data.mustChangePassword === true,
+    credentialMigratedAt: FieldValue.serverTimestamp(),
+    updatedAt: FieldValue.serverTimestamp(),
+  });
+  const student = studentSnap.data() || {};
+  const classIds = new Set([
+    student.classId,
+    student.currentClassId,
+    ...(Array.isArray(student.classIds) ? student.classIds : []),
+    ...(Array.isArray(student.enrolledClassIds) ? student.enrolledClassIds : []),
+    ...(Array.isArray(student.joinedClasses)
+      ? student.joinedClasses.map((entry) => entry && entry.classId)
+      : []),
+  ].map((value) => String(value || "").trim()).filter(Boolean));
+  for (const classId of classIds) {
+    const classStudentRef = db.collection("schools").doc(session.schoolId)
+      .collection("classes").doc(classId).collection("students").doc(studentId);
+    const classStudentSnap = await classStudentRef.get();
+    if (classStudentSnap.exists) {
+      await classStudentRef.update({
+        password: FieldValue.delete(),
+        mustChangePassword: data && data.mustChangePassword === true,
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+    }
+  }
+  return { ok: true, studentId };
+}
+
+async function setStudentCredentialsBatchForTeacher({ db, authUid, data }) {
+  const items = Array.isArray(data && data.items) ? data.items : [];
+  if (items.length === 0 || items.length > 500) {
+    throw new WritingAccessError("invalid-argument", "生徒パスワード一覧が不正です。");
+  }
+  const session = await resolveWritingTeacherSession({ db, authUid });
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(4, items.length) }, async () => {
+    while (cursor < items.length) {
+      const item = items[cursor++];
+      await setStudentCredentialForTeacher({
+        db,
+        authUid: session.authUid,
+        data: item,
+      });
+    }
+  });
+  await Promise.all(workers);
+  return { ok: true, count: items.length };
+}
+
+async function setTeacherCredentialForAdmin({ db, authUid, data }) {
+  const session = await requireSchoolTeacherAdmin({ db, authUid });
+  const teacherId = cleanId(data && data.teacherId, "teacherId");
+  const password = cleanPassword(data && data.password);
+  const teacherRef = db.collection("schools").doc(session.schoolId)
+    .collection("teachers").doc(teacherId);
+  const teacherSnap = await teacherRef.get();
+  if (!teacherSnap.exists) {
+    throw new WritingAccessError("not-found", "対象の教員が見つかりません。");
+  }
+  await writeCredential({
+    db,
+    schoolId: session.schoolId,
+    principalType: "teacher",
+    principalId: teacherId,
+    password,
+    metadata: {
+      createdAt: FieldValue.serverTimestamp(),
+      changedByTeacherId: session.teacherId,
+    },
+  });
+  await teacherRef.update({
+    password: FieldValue.delete(),
+    credentialMigratedAt: FieldValue.serverTimestamp(),
+    updatedAt: FieldValue.serverTimestamp(),
+  });
+  return { ok: true, teacherId };
+}
+
+async function setTeacherCredentialsBatchForAdmin({ db, authUid, data }) {
+  const items = Array.isArray(data && data.items) ? data.items : [];
+  if (items.length === 0 || items.length > 100) {
+    throw new WritingAccessError("invalid-argument", "教員パスワード一覧が不正です。");
+  }
+  await requireSchoolTeacherAdmin({ db, authUid });
+  for (const item of items) {
+    await setTeacherCredentialForAdmin({ db, authUid, data: item });
+  }
+  return { ok: true, count: items.length };
 }
 
 async function getTeacherProfileForTeacher({ db, authUid }) {
@@ -629,6 +776,10 @@ module.exports = {
   authenticateWritingTeacher,
   refreshWritingTeacherSession,
   resolveWritingTeacherSession,
+  setStudentCredentialForTeacher,
+  setStudentCredentialsBatchForTeacher,
+  setTeacherCredentialForAdmin,
+  setTeacherCredentialsBatchForAdmin,
   getTeacherProfileForTeacher,
   acceptCopyrightGuidanceForTeacher,
   createWritingPerformanceTestForTeacher,

@@ -2,7 +2,11 @@
 
 const { HttpsError } = require("firebase-functions/v2/https");
 const { FieldValue, Timestamp } = require("firebase-admin/firestore");
-const crypto = require("crypto");
+const {
+  currentCredentialFingerprint,
+  verifyCredential,
+  writeCredential,
+} = require("./credential_security");
 
 const SESSION_COLLECTION = "studentSessions";
 const FEATURE_FLAGS_COLLECTION = "writingFeatureFlags";
@@ -43,21 +47,26 @@ function cleanPassword(value) {
   return text;
 }
 
-function passwordsMatch(actual, expected) {
-  const left = Buffer.from(String(actual || ""));
-  const right = Buffer.from(String(expected || ""));
-  return left.length === right.length && crypto.timingSafeEqual(left, right);
-}
-
-function credentialFingerprint(password) {
-  return crypto.createHash("sha256").update(String(password || "")).digest("hex");
-}
-
 function timestampMillis(value) {
   if (value && typeof value.toMillis === "function") return value.toMillis();
   if (value && Number.isFinite(value._seconds)) return value._seconds * 1000;
   if (value && Number.isFinite(value.seconds)) return value.seconds * 1000;
   return 0;
+}
+
+function legacyStudentPasswordRefs({ db, schoolId, studentInternalUid, student }) {
+  const schoolRef = db.collection("schools").doc(schoolId);
+  const classIds = new Set([
+    student.classId,
+    student.currentClassId,
+    ...(Array.isArray(student.classIds) ? student.classIds : []),
+    ...(Array.isArray(student.enrolledClassIds) ? student.enrolledClassIds : []),
+    ...(Array.isArray(student.joinedClasses)
+      ? student.joinedClasses.map((entry) => entry && entry.classId)
+      : []),
+  ].map((value) => String(value || "").trim()).filter(Boolean));
+  return [...classIds].map((classId) => schoolRef.collection("classes")
+    .doc(classId).collection("students").doc(studentInternalUid));
 }
 
 async function loadStudentClasses({ db, schoolId, studentInternalUid, student }) {
@@ -115,9 +124,27 @@ async function authenticateStudentSession({ db, authUid, data }) {
   const schoolData = school.data() || {};
   if ((student.isDemoStudent === true || student.isDemoData === true) &&
       schoolData.demoDataVisible !== true) {
-    throw new WritingAccessError("permission-denied", "現在このデモアカウントは利用できません。");
+      throw new WritingAccessError("permission-denied", "現在このデモアカウントは利用できません。");
   }
-  if (student.active === false || !passwordsMatch(password, student.password)) {
+  if (student.active === false) {
+    throw new WritingAccessError("permission-denied", "学校ID、生徒ID、またはパスワードが正しくありません。");
+  }
+  const credential = await verifyCredential({
+    db,
+    schoolId: school.id,
+    principalType: "student",
+    principalId: studentSnap.id,
+    password,
+    profileRef: studentSnap.ref,
+    legacyPassword: student.password,
+    cleanupLegacyRefs: legacyStudentPasswordRefs({
+      db,
+      schoolId: school.id,
+      studentInternalUid: studentSnap.id,
+      student,
+    }),
+  });
+  if (!credential.valid) {
     throw new WritingAccessError("permission-denied", "学校ID、生徒ID、またはパスワードが正しくありません。");
   }
   const classes = await loadStudentClasses({
@@ -136,7 +163,7 @@ async function authenticateStudentSession({ db, authUid, data }) {
     loginId,
     expiresAt: Timestamp.fromMillis(sessionExpiresAtMillis),
     absoluteExpiresAt: Timestamp.fromMillis(absoluteExpiresAtMillis),
-    credentialFingerprint: credentialFingerprint(student.password),
+    credentialFingerprint: credential.fingerprint,
     createdAt: now,
     updatedAt: now,
   }, { merge: true });
@@ -228,7 +255,22 @@ async function registerWritingStudentSession({ db, admin, authUid, data }) {
       "Writing認証に失敗しました。"
     );
   }
-  if (String(student.password || "") !== password) {
+  const credential = await verifyCredential({
+    db,
+    schoolId,
+    principalType: "student",
+    principalId: studentInternalUid,
+    password,
+    profileRef: studentRef,
+    legacyPassword: student.password,
+    cleanupLegacyRefs: legacyStudentPasswordRefs({
+      db,
+      schoolId,
+      studentInternalUid,
+      student,
+    }),
+  });
+  if (!credential.valid) {
     throw new WritingAccessError(
       "permission-denied",
       "Writing認証に失敗しました。"
@@ -253,7 +295,7 @@ async function registerWritingStudentSession({ db, admin, authUid, data }) {
       studentId: studentInternalUid,
       expiresAt: Timestamp.fromMillis(Date.now() + SESSION_IDLE_TTL_MS),
       absoluteExpiresAt: Timestamp.fromMillis(Date.now() + SESSION_ABSOLUTE_TTL_MS),
-      credentialFingerprint: credentialFingerprint(student.password),
+      credentialFingerprint: credential.fingerprint,
       createdAt: now,
       updatedAt: now,
     },
@@ -302,9 +344,19 @@ async function resolveWritingSession({ db, authUid, allowExpiredIdle = false }) 
   const student = studentSnap.exists ? studentSnap.data() : null;
   const schoolSnap = await db.collection("schools").doc(schoolId).get();
   const school = schoolSnap.exists ? schoolSnap.data() : null;
+  const activeFingerprint = student
+    ? await currentCredentialFingerprint({
+      db,
+      schoolId,
+      principalType: "student",
+      principalId: studentInternalUid,
+      legacyPassword: student.password,
+    })
+    : "";
   if (!school || !student || student.active === false ||
+      !activeFingerprint ||
       (session.credentialFingerprint &&
-       session.credentialFingerprint !== credentialFingerprint(student.password)) ||
+       session.credentialFingerprint !== activeFingerprint) ||
       ((student.isDemoStudent === true || student.isDemoData === true) &&
        school.demoDataVisible !== true)) {
     throw new WritingAccessError(
@@ -336,13 +388,75 @@ async function refreshStudentSession({ db, authUid }) {
   const sessionExpiresAtMillis = nowMillis + SESSION_IDLE_TTL_MS;
   const studentSnap = await db.collection("schools").doc(session.schoolId)
     .collection("students").doc(session.studentInternalUid).get();
+  const activeFingerprint = await currentCredentialFingerprint({
+    db,
+    schoolId: session.schoolId,
+    principalType: "student",
+    principalId: session.studentInternalUid,
+    legacyPassword: studentSnap.data().password,
+  });
   await sessionRef.set({
     expiresAt: Timestamp.fromMillis(sessionExpiresAtMillis),
     absoluteExpiresAt: Timestamp.fromMillis(absoluteExpiresAtMillis),
-    credentialFingerprint: credentialFingerprint(studentSnap.data().password),
+    credentialFingerprint: activeFingerprint,
     updatedAt: FieldValue.serverTimestamp(),
   }, { merge: true });
   return { ok: true, sessionExpiresAtMillis };
+}
+
+async function changeStudentPassword({ db, authUid, data }) {
+  const session = await resolveWritingSession({ db, authUid });
+  const newPassword = cleanPassword(data && data.newPassword);
+  if (newPassword.length < 4) {
+    throw new WritingAccessError(
+      "invalid-argument",
+      "新しいパスワードは4文字以上で入力してください。"
+    );
+  }
+  const studentRef = db.collection("schools").doc(session.schoolId)
+    .collection("students").doc(session.studentInternalUid);
+  const studentSnap = await studentRef.get();
+  const student = studentSnap.data() || {};
+  const stored = await writeCredential({
+    db,
+    schoolId: session.schoolId,
+    principalType: "student",
+    principalId: session.studentInternalUid,
+    password: newPassword,
+    metadata: {
+      createdAt: FieldValue.serverTimestamp(),
+      changedByAuthUid: session.authUid,
+    },
+  });
+  const updates = {
+    password: FieldValue.delete(),
+    mustChangePassword: false,
+    credentialMigratedAt: FieldValue.serverTimestamp(),
+    updatedAt: FieldValue.serverTimestamp(),
+  };
+  await studentRef.update(updates);
+  for (const legacyRef of legacyStudentPasswordRefs({
+    db,
+    schoolId: session.schoolId,
+    studentInternalUid: session.studentInternalUid,
+    student,
+  })) {
+    try {
+      const snap = await legacyRef.get();
+      if (snap.exists) await legacyRef.update(updates);
+    } catch (error) {
+      console.warn("Student password changed but class-copy cleanup failed", {
+        schoolId: session.schoolId,
+        studentId: session.studentInternalUid,
+        message: error?.message || String(error),
+      });
+    }
+  }
+  await db.collection(SESSION_COLLECTION).doc(session.authUid).set({
+    credentialFingerprint: stored.fingerprint,
+    updatedAt: FieldValue.serverTimestamp(),
+  }, { merge: true });
+  return { ok: true };
 }
 
 async function getWritingFeatureStatus({ db, authUid }) {
@@ -421,6 +535,7 @@ module.exports = {
   setSchoolWritingFeature,
   registerWritingStudentSession,
   refreshStudentSession,
+  changeStudentPassword,
   resolveWritingSession,
   getWritingFeatureStatus,
   assertWritingEnabledForAuth,

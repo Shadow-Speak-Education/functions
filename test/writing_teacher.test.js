@@ -13,6 +13,8 @@ const {
   resolveWritingTeacherSession,
   saveWritingPerformanceQuickEvaluationForTeacher,
   saveWritingPerformanceReviewForTeacher,
+  setStudentCredentialForTeacher,
+  setTeacherCredentialForAdmin,
   setWritingPerformanceTestActiveForTeacher,
 } = require("../writing_teacher");
 
@@ -29,7 +31,12 @@ class FakeRef {
   }
   async update(value) {
     if (!this.db.docs.has(this.path)) throw new Error("missing");
-    this.db.docs.set(this.path, { ...this.db.docs.get(this.path), ...value });
+    const current = { ...this.db.docs.get(this.path) };
+    for (const [key, item] of Object.entries(value)) {
+      if (item?.constructor?.name === "DeleteTransform") delete current[key];
+      else current[key] = item;
+    }
+    this.db.docs.set(this.path, current);
   }
 }
 class FakeQuery {
@@ -73,7 +80,8 @@ function fixture() {
   return new FakeDb([
     ["schools/school-a", { schoolCode: "SCHOOL-A" }],
     ["writingFeatureFlags/school-a", { enabled: true }],
-    ["schools/school-a/teachers/teacher-a", { name: "A先生", password: "secret", active: true }],
+    ["schools/school-a/teachers/teacher-a", { name: "A先生", password: "secret", active: true, isAdmin: true }],
+    ["schools/school-a/teachers/teacher-c", { name: "C先生", password: "legacy-c", active: true }],
     ["schools/school-a/classes/class-a", { name: "1A" }],
     ["schools/school-a/classes/class-c", { className: "1C" }],
     ["schools/school-a/students/student-a", { name: "生徒A", loginId: "001", grade: "1", class: "2", number: "1", classIds: ["class-a"] }],
@@ -103,7 +111,41 @@ async function test(name, fn) {
     const result = await authenticateWritingTeacher({ db, authUid: "auth-a", data: { schoolCode: "SCHOOL-A", teacherId: "teacher-a", password: "secret" } });
     assert.strictEqual(result.schoolId, "school-a");
     assert.strictEqual(db.docs.get("teacherSessions/auth-a").teacherId, "teacher-a");
+    assert.strictEqual(
+      db.docs.get("schoolCredentials/school-a/teacherCredentials/teacher-a").algorithm,
+      "scrypt",
+    );
+    assert.strictEqual(
+      db.docs.get("schools/school-a/teachers/teacher-a").password,
+      undefined,
+    );
     await assert.rejects(() => authenticateWritingTeacher({ db, authUid: "bad", data: { schoolCode: "SCHOOL-A", teacherId: "teacher-a", password: "wrong" } }), /正しくありません/);
+  });
+
+  await test("teacher/admin credential reset stores only a server-side hash", async () => {
+    const db = fixture();
+    await authenticateWritingTeacher({
+      db, authUid: "auth-a",
+      data: { schoolCode: "SCHOOL-A", teacherId: "teacher-a", password: "secret" },
+    });
+    await setStudentCredentialForTeacher({
+      db, authUid: "auth-a",
+      data: { studentId: "student-a", password: "student-new", mustChangePassword: true },
+    });
+    await setTeacherCredentialForAdmin({
+      db, authUid: "auth-a",
+      data: { teacherId: "teacher-c", password: "teacher-new" },
+    });
+    assert.strictEqual(
+      db.docs.get("schoolCredentials/school-a/studentCredentials/student-a").algorithm,
+      "scrypt",
+    );
+    assert.strictEqual(
+      db.docs.get("schoolCredentials/school-a/teacherCredentials/teacher-c").algorithm,
+      "scrypt",
+    );
+    assert.strictEqual(db.docs.get("schools/school-a/students/student-a").password, undefined);
+    assert.strictEqual(db.docs.get("schools/school-a/teachers/teacher-c").password, undefined);
   });
 
   await test("teacher profile exposes Writing as a standard feature", async () => {

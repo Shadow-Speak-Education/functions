@@ -16,6 +16,13 @@ const os = require("os");
 const fetch = require("node-fetch");
 const FormData = require("form-data");
 const {
+  SecureAudioAccessError,
+  assertOwned,
+  downloadAudio,
+  requireSession: requireAudioSession,
+  resolvePath: resolveAudioStoragePath,
+} = require("./secure_audio_access");
+const {
   correctWritingHandler,
   extractWritingTextFromImageHandler,
   WritingFunctionError,
@@ -25,6 +32,7 @@ const {
   toHttpsError,
   authenticateStudentSession,
   refreshStudentSession,
+  changeStudentPassword,
   registerWritingStudentSession,
   getWritingFeatureStatus,
   setSchoolWritingFeature,
@@ -53,6 +61,10 @@ const {
   getWritingPerformanceSubmissionForTeacher,
   saveWritingPerformanceReviewForTeacher,
   saveWritingPerformanceQuickEvaluationForTeacher,
+  setStudentCredentialForTeacher,
+  setStudentCredentialsBatchForTeacher,
+  setTeacherCredentialForAdmin,
+  setTeacherCredentialsBatchForAdmin,
 } = require("./writing_teacher");
 const {
   assertDemoManager,
@@ -171,6 +183,22 @@ exports.refreshStudentSession = onCall(
       if (error instanceof WritingAccessError) throw toHttpsError(error);
       console.error("🚨 refreshStudentSession failed", { message: error?.message || String(error) });
       throw new HttpsError("internal", "生徒セッションの更新に失敗しました。");
+    }
+  }
+);
+
+exports.changeStudentPassword = onCall(
+  { region: "asia-northeast1", timeoutSeconds: 30, memory: "256MiB" },
+  async (req) => {
+    if (!req.auth?.uid) throw new HttpsError("unauthenticated", "ログインが必要です。");
+    try {
+      return await changeStudentPassword({ db, authUid: req.auth.uid, data: req.data });
+    } catch (error) {
+      if (error instanceof WritingAccessError) throw toHttpsError(error);
+      console.error("🚨 changeStudentPassword failed", {
+        message: error?.message || String(error),
+      });
+      throw new HttpsError("internal", "パスワードの変更に失敗しました。");
     }
   }
 );
@@ -596,6 +624,52 @@ exports.authenticateWritingTeacher = teacherWritingCallable(
 exports.refreshWritingTeacherSession = teacherWritingCallable(
   refreshWritingTeacherSession,
   "教師セッションの更新に失敗しました。"
+);
+exports.setStudentCredential = teacherWritingCallable(
+  setStudentCredentialForTeacher,
+  "生徒パスワードの保存に失敗しました。"
+);
+exports.setTeacherCredential = teacherWritingCallable(
+  setTeacherCredentialForAdmin,
+  "教員パスワードの保存に失敗しました。"
+);
+exports.setStudentCredentialsBatch = onCall(
+  { region: "asia-northeast1", timeoutSeconds: 180, memory: "512MiB" },
+  async (req) => {
+    if (!req.auth?.uid) throw new HttpsError("unauthenticated", "ログインが必要です。");
+    try {
+      return await setStudentCredentialsBatchForTeacher({
+        db,
+        authUid: req.auth.uid,
+        data: req.data,
+      });
+    } catch (error) {
+      if (error instanceof WritingAccessError) throw toHttpsError(error);
+      console.error("🚨 setStudentCredentialsBatch failed", {
+        message: error?.message || String(error),
+      });
+      throw new HttpsError("internal", "生徒パスワードの一括保存に失敗しました。");
+    }
+  }
+);
+exports.setTeacherCredentialsBatch = onCall(
+  { region: "asia-northeast1", timeoutSeconds: 180, memory: "512MiB" },
+  async (req) => {
+    if (!req.auth?.uid) throw new HttpsError("unauthenticated", "ログインが必要です。");
+    try {
+      return await setTeacherCredentialsBatchForAdmin({
+        db,
+        authUid: req.auth.uid,
+        data: req.data,
+      });
+    } catch (error) {
+      if (error instanceof WritingAccessError) throw toHttpsError(error);
+      console.error("🚨 setTeacherCredentialsBatch failed", {
+        message: error?.message || String(error),
+      });
+      throw new HttpsError("internal", "教員パスワードの一括保存に失敗しました。");
+    }
+  }
 );
 exports.createStudentAppPreviewToken = teacherWritingCallable(
   async ({ db: firestore, authUid, data }) => {
@@ -1140,30 +1214,40 @@ exports.copyOfficialMaterialsOnClassCreate = onDocumentCreated(
 exports.transcribeFromUrl = onCall(
   { region: "asia-northeast1", secrets: [OPENAI_API_KEY] },
   async (req) => {
-    const audioUrl = req.data.audioUrl || req.data.sourceUrl;
-    if (!audioUrl) throw new Error("audioUrl required");
+    try {
+      const session = await requireAudioSession(db, req.auth?.uid);
+      const bucket = storage.bucket();
+      const storagePath = resolveAudioStoragePath(req.data, bucket.name);
+      assertOwned(storagePath, session);
+      const { buffer: buf } = await downloadAudio({ bucket, storagePath });
 
-    const audioResp = await fetch(audioUrl);
-    if (!audioResp.ok) throw new Error(`Failed to fetch audio: ${audioResp.status} ${audioResp.statusText}`);
-    const buf = Buffer.from(await audioResp.arrayBuffer());
+      const form = new FormData();
+      form.append("file", buf, { filename: "audio.wav", contentType: "audio/wav" });
+      form.append("model", "whisper-1");
+      form.append("response_format", "verbose_json");
+      form.append("timestamp_granularities[]", "word");
+      form.append("timestamp_granularities[]", "segment");
 
-    const form = new FormData();
-    form.append("file", buf, { filename: "audio.wav", contentType: "audio/wav" });
-    form.append("model", "whisper-1");
-    form.append("response_format", "verbose_json");
-    form.append("timestamp_granularities[]", "word");
-    form.append("timestamp_granularities[]", "segment");
+      const res = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${OPENAI_API_KEY.value()}`, ...form.getHeaders() },
+        body: form,
+      });
 
-    const res = await fetch("https://api.openai.com/v1/audio/transcriptions", {
-      method: "POST",
-      headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}`, ...form.getHeaders() },
-      body: form,
-    });
+      const text = await res.text();
+      if (!res.ok) throw new Error(text);
 
-    const text = await res.text();
-    if (!res.ok) throw new Error(text);
-
-    return JSON.parse(text);
+      return JSON.parse(text);
+    } catch (error) {
+      if (error instanceof SecureAudioAccessError) {
+        throw new HttpsError(error.code, error.message);
+      }
+      console.error("transcribeFromUrl failed", {
+        name: error?.name || "Error",
+        message: error?.message || String(error),
+      });
+      throw new HttpsError("internal", "音声解析に失敗しました。");
+    }
   }
 );
 
