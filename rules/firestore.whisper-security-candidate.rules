@@ -1,0 +1,241 @@
+// Production rules candidate for the Whisper idempotency rollout.
+//
+// Baseline:
+//   projects/shadow-speak-school/rulesets/
+//   5fbe93f0-5dc2-4526-a52f-761f8300728b
+//
+// This file intentionally preserves the existing schools/users permissions.
+// The former public catch-all is replaced with explicit compatibility rules
+// for top-level collections used by the current Flutter clients, followed by
+// a deny-all fallback.
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isActiveAdmin() {
+      return isSignedIn()
+        && exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+        && get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.active == true;
+    }
+
+    function teacherSession() {
+      return get(/databases/$(database)/documents/teacherSessions/$(request.auth.uid));
+    }
+
+    function isSchoolTeacherAdmin(schoolId) {
+      return isSignedIn()
+        && exists(/databases/$(database)/documents/teacherSessions/$(request.auth.uid))
+        && teacherSession().data.active == true
+        && teacherSession().data.role == 'teacher'
+        && teacherSession().data.schoolId == schoolId
+        && teacherSession().data.expiresAt > request.time
+        && exists(/databases/$(database)/documents/schools/$(schoolId)/teachers/$(teacherSession().data.teacherId))
+        && get(/databases/$(database)/documents/schools/$(schoolId)/teachers/$(teacherSession().data.teacherId)).data.isAdmin == true;
+    }
+
+    function protectedStudentFieldsUnchanged() {
+      return !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+        'studentId', 'loginId', 'studentInternalUid', 'internalUid', 'studentDocId',
+        'firstRegistrationYear', 'grade', 'class', 'className', 'number', 'seatNo',
+        'name', 'displayName', 'mustChangePassword', 'credentialProvisioningPending'
+      ]);
+    }
+
+    function protectedSchoolSettingsUnchanged() {
+      return !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+        'classNotation'
+      ]);
+    }
+
+    match /users/{userId} {
+      allow read, write: if isSignedIn()
+                         && request.auth.uid == userId;
+
+      match /joinedClasses/{classId} {
+        allow read, write: if isSignedIn();
+      }
+
+      match /{subPath=**} {
+        allow read, write: if isSignedIn()
+                           && request.auth.uid == userId;
+      }
+    }
+
+    match /schools/{schoolId} {
+      allow read: if true;
+      allow create, delete: if isSignedIn();
+      allow update: if isSignedIn()
+        && (protectedSchoolSettingsUnchanged()
+          || isSchoolTeacherAdmin(schoolId)
+          || isActiveAdmin());
+
+      match /performanceLogs/{logId} {
+        allow create: if true;
+        allow read: if true;
+        allow update, delete: if false;
+      }
+
+      match /teachers/{teacherId} {
+        allow read: if true;
+        allow write: if isSignedIn();
+      }
+
+      match /students/{studentId} {
+        allow read: if true;
+        allow create: if isSchoolTeacherAdmin(schoolId) || isActiveAdmin();
+        allow update: if isSignedIn()
+          && (protectedStudentFieldsUnchanged()
+            || isSchoolTeacherAdmin(schoolId)
+            || isActiveAdmin());
+        allow delete: if isSignedIn();
+
+        match /joinedClasses/{classId} {
+          allow read: if true;
+          allow write: if isSignedIn();
+        }
+
+        match /{subPath=**} {
+          allow read: if true;
+          allow write: if false;
+        }
+      }
+
+      match /materials/{materialId} {
+        allow read: if true;
+        allow write: if isSignedIn();
+
+        match /{subPath=**} {
+          allow read: if true;
+          allow write: if false;
+        }
+      }
+
+      match /vocabLists/{vocabListId} {
+        allow read: if true;
+        allow write: if isSignedIn();
+
+        match /words/{wordId} {
+          allow read: if true;
+          allow write: if isSignedIn();
+        }
+
+        match /{subPath=**} {
+          allow read: if true;
+          allow write: if isSignedIn();
+        }
+      }
+
+      match /classes/{classId} {
+        allow read: if true;
+        allow write: if isSignedIn();
+
+        match /students/{studentId} {
+          allow read: if true;
+          allow write: if isSignedIn();
+        }
+
+        match /materials/{materialId} {
+          allow read: if true;
+          allow write: if isSignedIn();
+
+          match /results/{studentInternalUid} {
+            allow read: if true;
+            allow write: if isSignedIn();
+          }
+
+          match /{subPath=**} {
+            allow read: if true;
+            allow write: if false;
+          }
+        }
+
+        match /vocabLists/{vocabListId} {
+          allow read: if true;
+          allow write: if isSignedIn();
+
+          match /words/{wordId} {
+            allow read: if true;
+            allow write: if isSignedIn();
+          }
+
+          match /{subPath=**} {
+            allow read: if true;
+            allow write: if isSignedIn();
+          }
+        }
+
+        match /vocabTests/{testId} {
+          allow read: if true;
+          allow write: if isSignedIn();
+
+          match /results/{studentInternalUid} {
+            allow read: if true;
+            allow write: if isSignedIn();
+          }
+
+          match /{subPath=**} {
+            allow read: if true;
+            allow write: if isSignedIn();
+          }
+        }
+
+        match /submit_boxes/{boxId} {
+          allow read: if true;
+          allow write: if isSignedIn();
+
+          match /submissions/{submissionId} {
+            allow read: if true;
+            allow write: if isSignedIn();
+          }
+
+          match /{subPath=**} {
+            allow read: if true;
+            allow write: if false;
+          }
+        }
+      }
+    }
+
+    // Admin app compatibility: it reads only the signed-in administrator's
+    // own document before opening the admin UI.
+    match /admins/{uid} {
+      allow read: if isSignedIn() && request.auth.uid == uid;
+      allow write: if false;
+    }
+
+    // The admin app observes these flags; writes go through a callable.
+    match /writingFeatureFlags/{schoolId} {
+      allow read: if isActiveAdmin();
+      allow write: if false;
+    }
+
+    // Curated public educational content used by material selection.
+    match /official_materials/{document=**} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // Legacy Settings fallback. The primary path is schools/{schoolId}/students.
+    // Keep authenticated read compatibility without retaining public access.
+    match /students/{studentId} {
+      allow read: if isSignedIn();
+      allow write: if false;
+    }
+
+    // Server-only idempotency/cache records. Client rules are always denied;
+    // Firebase Admin SDK access used by Cloud Functions bypasses these rules.
+    match /serverWhisperTranscriptionJobs/{jobId} {
+      allow read, write: if false;
+    }
+
+    // No unknown top-level collection is publicly readable.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

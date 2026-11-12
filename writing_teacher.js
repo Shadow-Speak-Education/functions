@@ -148,56 +148,129 @@ async function requireSchoolTeacherAdmin({ db, authUid }) {
   return session;
 }
 
-async function setStudentCredentialForTeacher({ db, authUid, data }) {
-  const session = await resolveWritingTeacherSession({ db, authUid });
-  const studentId = cleanId(data && data.studentId, "studentId");
-  const password = cleanPassword(data && data.password);
-  const studentRef = db.collection("schools").doc(session.schoolId)
-    .collection("students").doc(studentId);
-  const studentSnap = await studentRef.get();
-  if (!studentSnap.exists) {
-    throw new WritingAccessError("not-found", "対象の生徒が見つかりません。");
-  }
-  await writeCredential({
-    db,
-    schoolId: session.schoolId,
-    principalType: "student",
-    principalId: studentId,
-    password,
-    metadata: {
-      createdAt: FieldValue.serverTimestamp(),
-      changedByTeacherId: session.teacherId,
-    },
-  });
-  await studentRef.update({
-    password: FieldValue.delete(),
-    mustChangePassword: data && data.mustChangePassword === true,
-    credentialMigratedAt: FieldValue.serverTimestamp(),
-    updatedAt: FieldValue.serverTimestamp(),
-  });
-  const student = studentSnap.data() || {};
+async function teacherAuthorization({ db, session }) {
+  const teacherSnap = await db.collection("schools").doc(session.schoolId)
+    .collection("teachers").doc(session.teacherId).get();
+  const teacher = teacherSnap.exists ? teacherSnap.data() || {} : {};
+  return { isAdmin: teacher.isAdmin === true };
+}
+
+async function teacherCanAccessClass({ db, session, classId }) {
+  const authorization = await teacherAuthorization({ db, session });
+  if (authorization.isAdmin) return true;
+  const classSnap = await db.collection("schools").doc(session.schoolId)
+    .collection("classes").doc(classId).get();
+  if (!classSnap.exists) return false;
+  const value = classSnap.data() || {};
+  const teacherIds = new Set([
+    value.teacherId,
+    value.ownerTeacherId,
+    ...(Array.isArray(value.teacherIds) ? value.teacherIds : []),
+  ].map((item) => String(item || "").trim()).filter(Boolean));
+  return teacherIds.has(session.teacherId);
+}
+
+async function assertTeacherCanManageStudent({ db, session, studentId, student }) {
+  const authorization = await teacherAuthorization({ db, session });
+  if (authorization.isAdmin) return;
+  const schoolRef = db.collection("schools").doc(session.schoolId);
+  const joinedSnap = await schoolRef.collection("students").doc(studentId)
+    .collection("joinedClasses").where("active", "==", true).get();
   const classIds = new Set([
     student.classId,
     student.currentClassId,
     ...(Array.isArray(student.classIds) ? student.classIds : []),
     ...(Array.isArray(student.enrolledClassIds) ? student.enrolledClassIds : []),
-    ...(Array.isArray(student.joinedClasses)
-      ? student.joinedClasses.map((entry) => entry && entry.classId)
-      : []),
-  ].map((value) => String(value || "").trim()).filter(Boolean));
+    ...joinedSnap.docs.map((doc) => doc.data().classId || doc.id),
+  ].map((item) => String(item || "").trim()).filter(Boolean));
   for (const classId of classIds) {
-    const classStudentRef = db.collection("schools").doc(session.schoolId)
-      .collection("classes").doc(classId).collection("students").doc(studentId);
-    const classStudentSnap = await classStudentRef.get();
-    if (classStudentSnap.exists) {
-      await classStudentRef.update({
-        password: FieldValue.delete(),
-        mustChangePassword: data && data.mustChangePassword === true,
-        updatedAt: FieldValue.serverTimestamp(),
-      });
-    }
+    if (await teacherCanAccessClass({ db, session, classId })) return;
   }
-  return { ok: true, studentId };
+  throw new WritingAccessError(
+    "permission-denied",
+    "担当していない生徒のパスワードは変更できません。"
+  );
+}
+
+async function setStudentCredentialForTeacher({ db, authUid, data }) {
+  const session = await resolveWritingTeacherSession({ db, authUid });
+  const studentId = cleanId(data && data.studentId, "studentId");
+  const operation = data && data.operation === "initial_registration"
+    ? "initial_registration"
+    : "password_reset";
+  const studentRef = db.collection("schools").doc(session.schoolId)
+    .collection("students").doc(studentId);
+  try {
+    const password = cleanPassword(data && data.password);
+    const studentSnap = await studentRef.get();
+    if (!studentSnap.exists) {
+      throw new WritingAccessError("not-found", "対象の生徒が見つかりません。");
+    }
+    const student = studentSnap.data() || {};
+    if (operation === "initial_registration") {
+      const authorization = await teacherAuthorization({ db, session });
+      if (!authorization.isAdmin) {
+        throw new WritingAccessError("permission-denied", "学校管理者のみ初期パスワードを設定できます。");
+      }
+      if (student.credentialProvisioningPending !== true) {
+        throw new WritingAccessError("already-exists", "既存生徒のパスワードは一括登録では変更できません。");
+      }
+    }
+    await assertTeacherCanManageStudent({ db, session, studentId, student });
+    await writeCredential({
+      db, schoolId: session.schoolId, principalType: "student", principalId: studentId,
+      password,
+      metadata: { createdAt: FieldValue.serverTimestamp(), changedByTeacherId: session.teacherId },
+    });
+    await studentRef.update({
+      password: FieldValue.delete(),
+      mustChangePassword: operation === "initial_registration" || data?.mustChangePassword === true,
+      credentialProvisioningPending: FieldValue.delete(),
+      credentialMigratedAt: FieldValue.serverTimestamp(),
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+    const classIds = new Set([
+      student.classId, student.currentClassId,
+      ...(Array.isArray(student.classIds) ? student.classIds : []),
+      ...(Array.isArray(student.enrolledClassIds) ? student.enrolledClassIds : []),
+      ...(Array.isArray(student.joinedClasses) ? student.joinedClasses.map((entry) => entry && entry.classId) : []),
+    ].map((value) => String(value || "").trim()).filter(Boolean));
+    for (const classId of classIds) {
+      const classStudentRef = db.collection("schools").doc(session.schoolId)
+        .collection("classes").doc(classId).collection("students").doc(studentId);
+      const classStudentSnap = await classStudentRef.get();
+      if (classStudentSnap.exists) {
+        await classStudentRef.update({
+          password: FieldValue.delete(),
+          mustChangePassword: operation === "initial_registration" || data?.mustChangePassword === true,
+          updatedAt: FieldValue.serverTimestamp(),
+        });
+      }
+    }
+    await db.collection("schools").doc(session.schoolId)
+      .collection("passwordResetAudit").doc().set({
+        actorUid: session.authUid, actorTeacherId: session.teacherId,
+        targetStudentUid: studentId, schoolId: session.schoolId,
+        operation, result: "success",
+        mustChangePassword: operation === "initial_registration" || data?.mustChangePassword === true,
+        createdAt: FieldValue.serverTimestamp(),
+      });
+    return { ok: true, studentId };
+  } catch (error) {
+    try {
+      await db.collection("schools").doc(session.schoolId)
+        .collection("passwordResetAudit").doc().set({
+          actorUid: session.authUid, actorTeacherId: session.teacherId,
+          targetStudentUid: studentId, schoolId: session.schoolId,
+          operation, result: "failure",
+          errorCode: String(error?.code || "internal"),
+          createdAt: FieldValue.serverTimestamp(),
+        });
+    } catch (_) {
+      // 監査記録の失敗で元のエラーを隠さない。パスワード値は記録しない。
+    }
+    throw error;
+  }
 }
 
 async function setStudentCredentialsBatchForTeacher({ db, authUid, data }) {
@@ -305,6 +378,9 @@ async function teacherClassRef({ db, session, classId }) {
   const ref = db.collection("schools").doc(session.schoolId).collection("classes").doc(id);
   const snap = await ref.get();
   if (!snap.exists) throw new WritingAccessError("permission-denied", "対象クラスを利用できません。");
+  if (!await teacherCanAccessClass({ db, session, classId: id })) {
+    throw new WritingAccessError("permission-denied", "担当していないクラスは利用できません。");
+  }
   return { classId: id, classRef: ref };
 }
 
@@ -359,7 +435,15 @@ async function listWritingClassesForTeacher({ db, authUid }) {
   const session = await resolveWritingTeacherSession({ db, authUid });
   const snap = await db.collection("schools").doc(session.schoolId)
     .collection("classes").get();
-  const items = snap.docs.map((doc) => {
+  const authorization = await teacherAuthorization({ db, session });
+  const visibleDocs = authorization.isAdmin
+    ? snap.docs
+    : snap.docs.filter((doc) => {
+      const value = doc.data() || {};
+      return String(value.teacherId || value.ownerTeacherId || "") === session.teacherId ||
+        (Array.isArray(value.teacherIds) && value.teacherIds.map(String).includes(session.teacherId));
+    });
+  const items = visibleDocs.map((doc) => {
     const value = doc.data() || {};
     return {
       classId: doc.id,
@@ -776,6 +860,8 @@ module.exports = {
   authenticateWritingTeacher,
   refreshWritingTeacherSession,
   resolveWritingTeacherSession,
+  requireSchoolTeacherAdmin,
+  teacherClassRef,
   setStudentCredentialForTeacher,
   setStudentCredentialsBatchForTeacher,
   setTeacherCredentialForAdmin,

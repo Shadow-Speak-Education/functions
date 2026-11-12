@@ -1,0 +1,15 @@
+{
+  "firestore": {
+    "rules": "rules/firestore.whisper-security-candidate.rules"
+  },
+  "emulators": {
+    "firestore": {
+      "host": "127.0.0.1",
+      "port": 8181
+    },
+    "ui": {
+      "enabled": false
+    },
+    "singleProjectMode": true
+  }
+}

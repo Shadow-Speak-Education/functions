@@ -906,10 +906,11 @@ async function test(name, fn) {
           role: "teacher_preview",
           schoolId: "school-1",
           classId: "class-1",
+          previewStudentId: "student-1",
         },
         data: { classId: "class-1" },
       }),
-      { schoolId: "school-1", classId: "class-1" }
+      { schoolId: "school-1", classId: "class-1", studentId: "student-1" }
     );
     assert.throws(
       () => resolveWritingPerformancePreviewContext({
@@ -917,6 +918,7 @@ async function test(name, fn) {
           role: "teacher_preview",
           schoolId: "school-1",
           classId: "class-1",
+          previewStudentId: "student-1",
         },
         data: { classId: "class-2" },
       }),

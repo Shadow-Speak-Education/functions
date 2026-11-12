@@ -82,9 +82,10 @@ function fixture() {
     ["writingFeatureFlags/school-a", { enabled: true }],
     ["schools/school-a/teachers/teacher-a", { name: "A先生", password: "secret", active: true, isAdmin: true }],
     ["schools/school-a/teachers/teacher-c", { name: "C先生", password: "legacy-c", active: true }],
-    ["schools/school-a/classes/class-a", { name: "1A" }],
-    ["schools/school-a/classes/class-c", { className: "1C" }],
+    ["schools/school-a/classes/class-a", { name: "1A", teacherId: "teacher-c" }],
+    ["schools/school-a/classes/class-c", { className: "1C", teacherId: "teacher-a" }],
     ["schools/school-a/students/student-a", { name: "生徒A", loginId: "001", grade: "1", class: "2", number: "1", classIds: ["class-a"] }],
+    ["schools/school-a/students/student-c", { name: "生徒C", loginId: "003", grade: "1", class: "3", number: "1", classIds: ["class-c"] }],
     ["schools/school-a/classes/class-a/students/student-a", { studentInternalUid: "student-a", grade: "1", class: "2", number: "1" }],
     ["schools/school-b", { schoolCode: "SCHOOL-B" }],
     ["schools/school-b/teachers/teacher-b", { name: "B先生", password: "secret-b", active: true }],
@@ -146,6 +147,61 @@ async function test(name, fn) {
     );
     assert.strictEqual(db.docs.get("schools/school-a/students/student-a").password, undefined);
     assert.strictEqual(db.docs.get("schools/school-a/teachers/teacher-c").password, undefined);
+  });
+
+  await test("initial registration only provisions a pending new student once", async () => {
+    const db = fixture();
+    db.docs.get("schools/school-a/students/student-a").credentialProvisioningPending = true;
+    await authenticateWritingTeacher({
+      db, authUid: "auth-a",
+      data: { schoolCode: "SCHOOL-A", teacherId: "teacher-a", password: "secret" },
+    });
+    await setStudentCredentialForTeacher({
+      db, authUid: "auth-a",
+      data: {
+        studentId: "student-a", password: "shared-initial",
+        mustChangePassword: true, operation: "initial_registration",
+      },
+    });
+    const profile = db.docs.get("schools/school-a/students/student-a");
+    assert.strictEqual(profile.credentialProvisioningPending, undefined);
+    assert.strictEqual(profile.mustChangePassword, true);
+    assert.strictEqual(profile.password, undefined);
+    await assert.rejects(
+      () => setStudentCredentialForTeacher({
+        db, authUid: "auth-a",
+        data: {
+          studentId: "student-a", password: "must-not-overwrite",
+          mustChangePassword: true, operation: "initial_registration",
+        },
+      }),
+      /既存生徒のパスワード/
+    );
+  });
+
+  await test("general teacher resets only an assigned student and an audit is saved", async () => {
+    const db = fixture();
+    await authenticateWritingTeacher({
+      db, authUid: "auth-c",
+      data: { schoolCode: "SCHOOL-A", teacherId: "teacher-c", password: "legacy-c" },
+    });
+    await setStudentCredentialForTeacher({
+      db, authUid: "auth-c",
+      data: { studentId: "student-a", password: "assigned-new", mustChangePassword: true },
+    });
+    await assert.rejects(
+      () => setStudentCredentialForTeacher({
+        db, authUid: "auth-c",
+        data: { studentId: "student-c", password: "forbidden-new", mustChangePassword: true },
+      }),
+      /担当していない生徒/
+    );
+    const audit = [...db.docs.entries()].find(([path]) =>
+      path.startsWith("schools/school-a/passwordResetAudit/")
+    );
+    assert.ok(audit);
+    assert.strictEqual(audit[1].targetStudentUid, "student-a");
+    assert.strictEqual(audit[1].password, undefined);
   });
 
   await test("teacher profile exposes Writing as a standard feature", async () => {
