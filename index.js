@@ -701,37 +701,20 @@ exports.createStudentAppPreviewToken = teacherWritingCallable(
       authUid,
     });
     const classId = String(data?.classId || "").trim();
-    const studentId = String(data?.studentId || "").trim();
-    if (!classId || classId.includes("/") || !studentId || studentId.includes("/")) {
+    if (!classId || classId.includes("/")) {
       throw new WritingAccessError("invalid-argument", "クラス情報が不正です。");
     }
-    const { classRef } = await teacherClassRef({
+    await teacherClassRef({
       db: firestore,
       session,
       classId,
     });
-    const classSnap = await classRef.get();
-    const rosterRef = classSnap.ref.collection("students");
-    const directStudent = await rosterRef.doc(studentId).get();
-    const matchingStudents = directStudent.exists
-      ? null
-      : await rosterRef.where("studentInternalUid", "==", studentId).limit(1).get();
-    if (!directStudent.exists && matchingStudents.empty) {
-      throw new WritingAccessError("permission-denied", "対象生徒はこのクラスに所属していません。");
-    }
-    const rosterStudent = directStudent.exists
-      ? directStudent.data() || {}
-      : matchingStudents.docs[0].data() || {};
-    const membershipStatus = String(rosterStudent.membershipStatus || rosterStudent.status || "active");
-    if (rosterStudent.isCurrent === false || ["removed", "left", "transferred", "graduated"].includes(membershipStatus)) {
-      throw new WritingAccessError("permission-denied", "対象生徒は現在このクラスに所属していません。");
-    }
     const token = await admin.auth().createCustomToken(authUid, {
       role: "teacher_preview",
       schoolId: session.schoolId,
       teacherId: session.teacherId,
       classId,
-      previewStudentId: studentId,
+      previewStudentId: "teacher_preview",
     });
     return { token };
   },

@@ -906,11 +906,23 @@ async function test(name, fn) {
           role: "teacher_preview",
           schoolId: "school-1",
           classId: "class-1",
-          previewStudentId: "student-1",
+          previewStudentId: "teacher_preview",
         },
         data: { classId: "class-1" },
       }),
-      { schoolId: "school-1", classId: "class-1", studentId: "student-1" }
+      { schoolId: "school-1", classId: "class-1", studentId: "teacher_preview" }
+    );
+    assert.throws(
+      () => resolveWritingPerformancePreviewContext({
+        token: {
+          role: "teacher_preview",
+          schoolId: "school-1",
+          classId: "class-1",
+          previewStudentId: "teacher_preview",
+        },
+        data: { classId: "class-2" },
+      }),
+      (error) => error.code === "permission-denied"
     );
     assert.throws(
       () => resolveWritingPerformancePreviewContext({
@@ -920,7 +932,7 @@ async function test(name, fn) {
           classId: "class-1",
           previewStudentId: "student-1",
         },
-        data: { classId: "class-2" },
+        data: { classId: "class-1" },
       }),
       (error) => error.code === "permission-denied"
     );

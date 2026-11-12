@@ -980,6 +980,12 @@ function resolveWritingPerformancePreviewContext({ token, data }) {
   const schoolId = cleanId(token.schoolId, "schoolId");
   const tokenClassId = cleanId(token.classId, "classId");
   const studentId = cleanId(token.previewStudentId, "previewStudentId");
+  if (studentId !== "teacher_preview") {
+    throw new WritingAccessError(
+      "permission-denied",
+      "プレビュー専用アカウントではありません。"
+    );
+  }
   const requestedClassId = cleanId(data && data.classId, "classId");
   if (tokenClassId !== requestedClassId) {
     throw new WritingAccessError(
@@ -1004,37 +1010,9 @@ async function listWritingPerformanceTestsForPreview({ db, token, data }) {
       "プレビュー対象のクラスを利用できません。"
     );
   }
-  const rosterRef = classRef.collection("students");
-  const directStudent = await rosterRef.doc(studentId).get();
-  const matchingStudents = directStudent.exists
-    ? null
-    : await rosterRef.where("studentInternalUid", "==", studentId).limit(1).get();
-  if (!directStudent.exists && matchingStudents.empty) {
-    throw new WritingAccessError(
-      "permission-denied",
-      "プレビュー対象の生徒はこのクラスに所属していません。"
-    );
-  }
-  const rosterStudent = directStudent.exists
-    ? directStudent.data() || {}
-    : matchingStudents.docs[0].data() || {};
-  const membershipStatus = String(rosterStudent.membershipStatus || rosterStudent.status || "active");
-  if (rosterStudent.isCurrent === false ||
-      ["removed", "left", "transferred", "graduated"].includes(membershipStatus)) {
-    throw new WritingAccessError(
-      "permission-denied",
-      "プレビュー対象の生徒は現在このクラスに所属していません。"
-    );
-  }
   const snap = await classRef.collection("writingPerformanceTests")
     .where("isActive", "==", true).get();
-  const items = await Promise.all(snap.docs.map(async (doc) => {
-    const [submission, evaluation] = await Promise.all([
-      doc.ref.collection("submissions").doc(studentId).get(),
-      doc.ref.collection("evaluations").doc(studentId).get(),
-    ]);
-    return publicTestData(doc, submission, evaluation);
-  }));
+  const items = snap.docs.map((doc) => publicTestData(doc, null, null));
   return {
     items,
   };
